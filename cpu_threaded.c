@@ -241,20 +241,6 @@ extern u8 bit_count[256];
 
 #endif
 
-static INLINE void RW_INIT(void)
-{
-#ifdef VITA
-   sceKernelOpenVMDomain();
-#endif
-}
-
-static INLINE void RW_END(void)
-{
-#ifdef VITA
-   sceKernelCloseVMDomain();
-#endif
-}
-
 /* Cache invalidation */
 
 #if defined(PSP)
@@ -267,6 +253,7 @@ static INLINE void RW_END(void)
   {   	                                             \
     sceKernelSyncVMDomain(sceBlock,last_##which##_translation_ptr,          \
       which##_translation_ptr - last_##which##_translation_ptr);              \
+    last_##which##_translation_ptr = which##_translation_ptr;                 \
   }
 
 #define translate_invalidate_dcache()                                         \
