@@ -478,7 +478,7 @@ ifeq ($(HAVE_DYNAREC), 1)
 OBJECTS += 3ds/3ds_utils.o 3ds/3ds_cache_utils.o
 
 ifeq ($(strip $(CTRULIB)),)
-$(error "Please set CTRULIB in your environment. export CTRULIB=<path to>ctrulib")
+$(error "Please set CTRULIB in your environment. export CTRULIB=<path to>libctru")
 endif
 
 CFLAGS  += -I$(CTRULIB)/include
