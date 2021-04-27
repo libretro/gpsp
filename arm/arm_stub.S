@@ -45,15 +45,14 @@ _##symbol:
 #define CHANGED_PC_STATUS (31 * 4)
 #define COMPLETED_FRAME   (32 * 4)
 #define OAM_UPDATED       (33 * 4)
-#define MAIN_THREAD_SP    (34 * 4)
 
 #define reg_a0            r0
 #define reg_a1            r1
 #define reg_a2            r2
 
 #define reg_s0            r9
-#define reg_base          sp
-#define reg_flags         r11
+#define reg_base          r11
+#define reg_flags         r9
 
 #define reg_cycles        r12
 
@@ -151,11 +150,9 @@ _##symbol:
 @ registers which are important to the dynarec.
 
 #define call_c_function(function)                                            ;\
-  ldr sp, [reg_base, #MAIN_THREAD_SP]                                        ;\
   stmdb sp!, { call_c_saved_regs }                                           ;\
   bl function                                                                ;\
   ldmia sp!, { call_c_saved_regs }                                           ;\
-  ldr sp, =reg                                                               ;\
 
 @ Jumps to PC (ARM or Thumb modes)
 @ This is really two functions/routines in one
@@ -483,9 +480,7 @@ defsymbl(execute_arm_translate)
   @ save the registers to be able to return later
   stmdb sp!, { r4, r5, r6, r7, r8, r9, r10, r11, r12, lr }
 
-  ldr r1, =reg                            @ reg to r1
-  str sp, [r1, #MAIN_THREAD_SP]           @ store the current sp
-  ldr sp, =reg                            @ reg_base = sp (loading addr)
+  ldr reg_base, =reg                      @ init base_reg
 
   mvn reg_cycles, r0                      @ load cycle counter
 
@@ -515,8 +510,6 @@ defsymbl(execute_arm_translate)
 @ Epilogue to return to the main thread (whatever called execute_arm_translate)
 
 return_to_main:
-  @ restore the stack pointer
-  ldr sp, [reg_base, #MAIN_THREAD_SP]
   @ restore the saved regs and return
   ldmia sp!, { r4, r5, r6, r7, r8, r9, r10, r11, r12, lr }
   bx lr
