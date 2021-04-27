@@ -808,7 +808,7 @@ static void set_input_descriptors()
 static void set_memory_descriptors(void)
 {
    const uint64_t mem = RETRO_MEMORY_SYSTEM_RAM;
-   struct retro_memory_descriptor desc[9] = {
+   struct retro_memory_descriptor desc[2] = {
       { mem, iwram, 0x00000 + 0x8000, 0x3000000, 0, 0,  0x8000, NULL },
       { mem, ewram, 0x00000,          0x2000000, 0, 0, 0x40000, NULL },
    };
