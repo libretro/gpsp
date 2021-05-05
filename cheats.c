@@ -33,6 +33,19 @@ cheat_type cheats[MAX_CHEATS];
 u32 max_cheat = 0;
 u32 cheat_master_hook = 0xffffffff;
 
+static bool has_encrypted_codebreaker(cheat_type *cheat)
+{
+  int i;
+  for(i = 0; i < cheat->cheat_count; i++)
+  {
+     u32 code    = cheat->codes[i].address;
+     u32 opcode  = code >> 28;
+     if (opcode == 9)
+        return true;
+  }
+  return false;
+}
+
 static void update_hook_codebreaker(cheat_type *cheat)
 {
   int i;
@@ -103,7 +116,7 @@ static void process_cheat_codebreaker(cheat_type *cheat, u16 pad)
           bvalue = cheat->codes[i].address >> (24 - off*8);
           break;
         case 4 ... 5:
-          bvalue = cheat->codes[i].address >> (40 - off*8);
+          bvalue = cheat->codes[i].value >> (40 - off*8);
           break;
         };
         write_memory8(address, bvalue);
@@ -192,7 +205,7 @@ void cheat_clear()
    cheat_master_hook = 0xffffffff;
 }
 
-void cheat_parse(unsigned index, const char *code)
+cheat_error cheat_parse(unsigned index, const char *code)
 {
    int pos = 0;
    int codelen = strlen(code);
@@ -200,9 +213,9 @@ void cheat_parse(unsigned index, const char *code)
    char buf[1024];
    
    if (index >= MAX_CHEATS)
-      return;
+      return CheatErrorTooMany;
    if (codelen >= sizeof(buf))
-      return;
+      return CheatErrorTooBig;
 
    memcpy(buf, code, codelen+1);
    
@@ -236,13 +249,17 @@ void cheat_parse(unsigned index, const char *code)
    
    if (pos >= codelen)
    {
+      /* Check whether these cheats are readable */
+      if (has_encrypted_codebreaker(ch))
+         return CheatErrorEncrypted;
       /* All codes were parsed! Process hook here */
       ch->cheat_active = true;
       update_hook_codebreaker(ch);
-      return;
+      return CheatNoError;
    }
 
    /* TODO parse other types here */
+   return CheatErrorNotSupported;
 }
 
 

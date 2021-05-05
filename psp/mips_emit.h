@@ -44,7 +44,7 @@ void mips_indirect_branch_dual(u32 address);
 u32 execute_read_cpsr();
 u32 execute_read_spsr();
 void execute_swi(u32 pc);
-void mips_cheat_hook();
+void mips_cheat_hook(void);
 
 u32 execute_spsr_restore(u32 address);
 void execute_store_cpsr(u32 new_cpsr, u32 store_mask);

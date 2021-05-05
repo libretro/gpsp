@@ -23,9 +23,17 @@
 #define MAX_CHEATS       20
 #define MAX_CHEAT_CODES  64
 
+typedef enum {
+   CheatNoError = 0,
+   CheatErrorTooMany,
+   CheatErrorTooBig,
+   CheatErrorEncrypted,
+   CheatErrorNotSupported
+} cheat_error;
+
 void process_cheats(void);
-void cheat_parse(unsigned index, const char *code);
-void cheat_clear();
+cheat_error cheat_parse(unsigned index, const char *code);
+void cheat_clear(void);
 
 extern u32 cheat_master_hook;
 
