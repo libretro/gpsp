@@ -17,28 +17,17 @@
  * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA
  */
 
-#define CHEAT_NAME_LENGTH 17
+#ifndef __GPSP_CHEATS_H__
+#define __GPSP_CHEATS_H__
 
-typedef enum
-{
-  CHEAT_TYPE_GAMESHARK_V1,
-  CHEAT_TYPE_GAMESHARK_V3,
-  CHEAT_TYPE_INVALID
-} cheat_variant_enum;
-
-typedef struct
-{
-  char cheat_name[CHEAT_NAME_LENGTH];
-  u32 cheat_active;
-  u32 cheat_codes[256];
-  u32 num_cheat_lines;
-  cheat_variant_enum cheat_variant;
-} cheat_type;
+#define MAX_CHEATS       20
+#define MAX_CHEAT_CODES  64
 
 void process_cheats(void);
-void add_cheats(char *cheats_filename);
+void cheat_parse(unsigned index, const char *code);
+void cheat_clear();
 
-#define MAX_CHEATS 16
+extern u32 cheat_master_hook;
 
-extern cheat_type cheats[MAX_CHEATS];
-extern u32 num_cheats;
+#endif
+

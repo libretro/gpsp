@@ -288,6 +288,22 @@ arm_update_gba_builder(idle_arm, arm, add)
 arm_update_gba_builder(idle_thumb, thumb, add)
 
 
+@ Cheat hooks for master function
+@ This is called whenever PC == cheats-master-function
+@ Just calls the C function to process cheats
+
+#define cheat_hook_builder(mode)                                             ;\
+defsymbl(mode##_cheat_hook)                                                  ;\
+  save_flags()                                                               ;\
+  store_registers_##mode()                                                   ;\
+  call_c_function(process_cheats)                                            ;\
+  load_registers_##mode()                                                    ;\
+  restore_flags()                                                            ;\
+  bx lr                                                                      ;\
+
+cheat_hook_builder(arm)
+cheat_hook_builder(thumb)
+
 
 @ These are b stubs for performing indirect branches. They are not
 @ linked to and don't return, instead they link elsewhere.

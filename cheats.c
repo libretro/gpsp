@@ -19,373 +19,230 @@
 
 #include "common.h"
 
+typedef struct
+{
+  bool cheat_active;
+  struct {
+    u32 address;
+    u32 value;
+  } codes[MAX_CHEAT_CODES];
+  unsigned cheat_count;
+} cheat_type;
+
 cheat_type cheats[MAX_CHEATS];
-u32 num_cheats;
+u32 max_cheat = 0;
+u32 cheat_master_hook = 0xffffffff;
 
-void decrypt_gsa_code(u32 *address_ptr, u32 *value_ptr, cheat_variant_enum
- cheat_variant)
+static void update_hook_codebreaker(cheat_type *cheat)
 {
-  u32 i;
-  u32 address = *address_ptr;
-  u32 value = *value_ptr;
-  u32 r = 0xc6ef3720;
-
-  u32 seeds_v1[4] =
+  int i;
+  for(i = 0; i < cheat->cheat_count; i++)
   {
-    0x09f4fbbd, 0x9681884a, 0x352027e9, 0xf3dee5a7
-  };
-  u32 seeds_v3[4] =
-  {
-    0x7aa9648f, 0x7fae6994, 0xc0efaad5, 0x42712c57
-  };
-  u32 *seeds;
+     u32 code    = cheat->codes[i].address;
+     u32 address = code & 0xfffffff;
+     u32 opcode  = code >> 28;
 
-  if(cheat_variant == CHEAT_TYPE_GAMESHARK_V1)
-    seeds = seeds_v1;
-  else
-    seeds = seeds_v3;
-
-  for(i = 0; i < 32; i++)
-  {
-    value -= ((address << 4) + seeds[2]) ^ (address + r) ^
-     ((address >> 5) + seeds[3]);
-    address -= ((value << 4) + seeds[0]) ^ (value + r) ^
-     ((value >> 5) + seeds[1]);
-    r -= 0x9e3779b9;
+     if (opcode == 1)
+     {
+        u32 pcaddr = 0x08000000 | (address & 0x1ffffff);
+        #ifdef HAVE_DYNAREC
+        if (cheat_master_hook != pcaddr)
+           init_caches();   /* Flush caches to install hook */
+        #endif
+        cheat_master_hook = pcaddr;
+        return;   /* Only support for one hook */
+     }
   }
-
-  *address_ptr = address;
-  *value_ptr = value;
 }
 
-void add_cheats(char *cheats_filename)
+static void process_cheat_codebreaker(cheat_type *cheat, u16 pad)
 {
-  FILE *cheats_file;
-  char current_line[256];
-  char *name_ptr;
-  u32 *cheat_code_ptr;
-  u32 address, value;
-  u32 num_cheat_lines;
-  u32 cheat_name_length;
-  cheat_variant_enum current_cheat_variant;
-
-  num_cheats = 0;
-
-  cheats_file = fopen(cheats_filename, "rb");
-
-  if(cheats_file)
+  int i;
+  unsigned j;
+  for(i = 0; i < cheat->cheat_count; i++)
   {
-    while(fgets(current_line, 256, cheats_file))
-    {
-      // Get the header line first
-      name_ptr = strchr(current_line, ' ');
-      if(name_ptr)
-      {
-        *name_ptr = 0;
-        name_ptr++;
-      }
+    u32 code    = cheat->codes[i].address;
+    u16 value   = cheat->codes[i].value;
+    u32 address = code & 0xfffffff;
+    u32 opcode  = code >> 28;
 
-      if(!strcasecmp(current_line, "gameshark_v1") ||
-       !strcasecmp(current_line, "gameshark_v2") ||
-       !strcasecmp(current_line, "PAR_v1") ||
-       !strcasecmp(current_line, "PAR_v2"))
+    switch (opcode) {
+    case 0:   /* Game CRC, ignored for now */
+      break;
+    case 1:   /* Master code function */
+      break;
+    case 2:   /* 16 bit OR */
+      write_memory16(address, read_memory16(address) | value);
+      break;
+    case 3:   /* 8 bit write */
+      write_memory8(address, value);
+      break;
+    case 4:   /* Slide code, writes a buffer with addr/value strides */
+      if (i + 1 < cheat->cheat_count)
       {
-        current_cheat_variant = CHEAT_TYPE_GAMESHARK_V1;
+        u16 count = cheat->codes[++i].address;
+        u16 vincr = cheat->codes[  i].address >> 16;
+        u16 aincr = cheat->codes[  i].value;
+        for (j = 0; j < count; j++)
+        {
+          write_memory16(address, value);
+          address += aincr;
+          value += vincr;
+        }
+      }
+      break;
+    case 5:   /* Super code: copies bytes to a buffer addr */
+      for (j = 0; j < value * 2 && i < cheat->cheat_count; j++)
+      {
+        u8 bvalue, off = j % 6;
+        switch (off) {
+        case 0:
+          bvalue = cheat->codes[++i].address >> 24;
+          break;
+        case 1 ... 3:
+          bvalue = cheat->codes[i].address >> (24 - off*8);
+          break;
+        case 4 ... 5:
+          bvalue = cheat->codes[i].address >> (40 - off*8);
+          break;
+        };
+        write_memory8(address, bvalue);
+        address++;
+      }
+      break;
+    case 6:   /* 16 bit AND */
+      write_memory16(address, read_memory16(address) & value);
+      break;
+    case 7:   /* Compare mem value and execute next cheat */
+      if (read_memory16(address) != value)
+        i++;
+      break;
+    case 8:   /* 16 bit write */
+      write_memory16(address, value);
+      break;
+    case 10:   /* Compare mem value and skip next cheat */
+      if (read_memory16(address) == value)
+        i++;
+      break;
+    case 11:   /* Compare mem value and skip next cheat */
+      if (read_memory16(address) <= value)
+        i++;
+      break;
+    case 12:   /* Compare mem value and skip next cheat */
+      if (read_memory16(address) >= value)
+        i++;
+      break;
+    case 13:   /* Check button state and execute next cheat */
+      switch ((address >> 4) & 0xf) {
+      case 0:
+        if (((~pad) & 0x3ff) == value)
+          i++;
+        break;
+      case 1:
+        if ((pad & value) == value)
+          i++;
+        break;
+      case 2:
+        if ((pad & value) == 0)
+          i++;
+        break;
+      };
+      break;
+    case 14:   /* Increase 16/32 bit memory value */
+      if (address & 1)
+      {
+        u32 value32 = (u32)((s16)value);  /* Sign extend to 32 bit */
+        address &= ~1U;
+        write_memory32(address, read_memory32(address) + value32);
       }
       else
-
-      if(!strcasecmp(current_line, "gameshark_v3") ||
-       !strcasecmp(current_line, "PAR_v3"))
       {
-        current_cheat_variant = CHEAT_TYPE_GAMESHARK_V3;
+        write_memory16(address, read_memory16(address) + value);
       }
-      else
-      {
-        current_cheat_variant = CHEAT_TYPE_INVALID;
-      }
-
-      if(current_cheat_variant != CHEAT_TYPE_INVALID)
-      {
-        strncpy(cheats[num_cheats].cheat_name, name_ptr, CHEAT_NAME_LENGTH - 1);
-        cheats[num_cheats].cheat_name[CHEAT_NAME_LENGTH - 1] = 0;
-        cheat_name_length = strlen(cheats[num_cheats].cheat_name);
-        if(cheat_name_length &&
-         ((cheats[num_cheats].cheat_name[cheat_name_length - 1] == '\n') ||
-          (cheats[num_cheats].cheat_name[cheat_name_length - 1] == '\r')))
-        {
-          cheats[num_cheats].cheat_name[cheat_name_length - 1] = 0;
-          cheat_name_length--;
-        }
-
-        if(cheat_name_length &&
-         cheats[num_cheats].cheat_name[cheat_name_length - 1] == '\r')
-        {
-          cheats[num_cheats].cheat_name[cheat_name_length - 1] = 0;
-        }
-
-        cheats[num_cheats].cheat_variant = current_cheat_variant;
-        cheat_code_ptr = cheats[num_cheats].cheat_codes;
-        num_cheat_lines = 0;
-
-        while(fgets(current_line, 256, cheats_file))
-        {
-          if(strlen(current_line) < 3)
-            break;
-
-          sscanf(current_line, "%08x %08x", &address, &value);
-
-          decrypt_gsa_code(&address, &value, current_cheat_variant);
-
-          cheat_code_ptr[0] = address;
-          cheat_code_ptr[1] = value;
-
-          cheat_code_ptr += 2;
-          num_cheat_lines++;
-        }
-
-        cheats[num_cheats].num_cheat_lines = num_cheat_lines;
-
-        num_cheats++;
-      }
-    }
-
-    fclose(cheats_file);
-  }
-}
-
-void process_cheat_gs1(cheat_type *cheat)
-{
-  u32 cheat_opcode;
-  u32 *code_ptr = cheat->cheat_codes;
-  u32 address, value;
-  u32 i;
-
-  for(i = 0; i < cheat->num_cheat_lines; i++)
-  {
-    address = code_ptr[0];
-    value = code_ptr[1];
-
-    code_ptr += 2;
-
-    cheat_opcode = address >> 28;
-    address &= 0xFFFFFFF;
-
-    switch(cheat_opcode)
-    {
-      case 0x0:
-        write_memory8(address, value);
-        break;
-
-      case 0x1:
-        write_memory16(address, value);
-        break;
-
-      case 0x2:
-        write_memory32(address, value);
-        break;
-
-      case 0x3:
-      {
-        u32 num_addresses = address & 0xFFFF;
-        u32 address1, address2;
-        u32 i2;
-
-        for(i2 = 0; i2 < num_addresses; i2++)
-        {
-          address1 = code_ptr[0];
-          address2 = code_ptr[1];
-          code_ptr += 2;
-          i++;
-
-          write_memory32(address1, value);
-          if(address2 != 0)
-            write_memory32(address2, value);
-        }
-        break;
-      }
-
-      // ROM patch not supported yet
-      case 0x6:
-        break;
-
-      // GS button down not supported yet
-      case 0x8:
-        break;
-
-      // Reencryption (DEADFACE) not supported yet
-      case 0xD:
-        if(read_memory16(address) != (value & 0xFFFF))
-        {
-          code_ptr += 2;
-          i++;
-        }
-        break;
-
-      case 0xE:
-        if(read_memory16(value & 0xFFFFFFF) != (address & 0xFFFF))
-        {
-          u32 skip = ((address >> 16) & 0x03);
-          code_ptr += skip * 2;
-          i += skip;
-        }
-        break;
-
-      // Hook routine not supported yet (not important??)
-      case 0x0F:
-        break;
+      break;
+    case 15:   /* Immediate and check and skip */
+      if ((read_memory16(address) & value) == 0)
+        i++;
+      break;
     }
   }
 }
-
-// These are especially incomplete.
-
-void process_cheat_gs3(cheat_type *cheat)
-{
-  u32 cheat_opcode;
-  u32 *code_ptr = cheat->cheat_codes;
-  u32 address, value;
-  u32 i;
-
-  for(i = 0; i < cheat->num_cheat_lines; i++)
-  {
-    address = code_ptr[0];
-    value = code_ptr[1];
-
-    code_ptr += 2;
-
-    cheat_opcode = address >> 28;
-    address &= 0xFFFFFFF;
-
-    switch(cheat_opcode)
-    {
-      case 0x0:
-        cheat_opcode = address >> 24;
-        address = (address & 0xFFFFF) + ((address << 4) & 0xF000000);
-
-        switch(cheat_opcode)
-        {
-          case 0x0:
-          {
-            u32 iterations = value >> 24;
-            u32 i2;
-
-            value &= 0xFF;
-
-            for(i2 = 0; i2 <= iterations; i2++, address++)
-            {
-              write_memory8(address, value);
-            }
-            break;
-          }
-
-          case 0x2:
-          {
-            u32 iterations = value >> 16;
-            u32 i2;
-
-            value &= 0xFFFF;
-
-            for(i2 = 0; i2 <= iterations; i2++, address += 2)
-            {
-              write_memory16(address, value);
-            }
-            break;
-          }
-
-          case 0x4:
-            write_memory32(address, value);
-            break;
-        }
-        break;
-
-      case 0x4:
-        cheat_opcode = address >> 24;
-        address = (address & 0xFFFFF) + ((address << 4) & 0xF000000);
-
-        switch(cheat_opcode)
-        {
-          case 0x0:
-            address = read_memory32(address) + (value >> 24);
-            write_memory8(address, value & 0xFF);
-            break;
-
-          case 0x2:
-            address = read_memory32(address) + ((value >> 16) * 2);
-            write_memory16(address, value & 0xFFFF);
-            break;
-
-          case 0x4:
-            address = read_memory32(address);
-            write_memory32(address, value);
-            break;
-
-        }
-        break;
-
-      case 0x8:
-        cheat_opcode = address >> 24;
-        address = (address & 0xFFFFF) + ((address << 4) & 0xF000000);
-
-        switch(cheat_opcode)
-        {
-          case 0x0:
-            value = (value & 0xFF) + read_memory8(address);
-            write_memory8(address, value);
-            break;
-
-          case 0x2:
-            value = (value & 0xFFFF) + read_memory16(address);
-            write_memory16(address, value);
-            break;
-
-          case 0x4:
-            value = value + read_memory32(address);
-            write_memory32(address, value);
-            break;
-        }
-        break;
-
-      case 0xC:
-        cheat_opcode = address >> 24;
-        address = (address & 0xFFFFFF) + 0x4000000;
-
-        switch(cheat_opcode)
-        {
-          case 0x6:
-            write_memory16(address, value);
-            break;
-
-          case 0x7:
-            write_memory32(address, value);
-            break;
-        }
-        break;
-    }
-  }
-}
-
 
 void process_cheats(void)
 {
-  u32 i;
+   u32 i;
 
-  for(i = 0; i < num_cheats; i++)
-  {
-    if(cheats[i].cheat_active)
-    {
-      switch(cheats[i].cheat_variant)
-      {
-        case CHEAT_TYPE_GAMESHARK_V1:
-          process_cheat_gs1(cheats + i);
-          break;
+   for(i = 0; i <= max_cheat; i++)
+   {
+      if(!cheats[i].cheat_active)
+         continue;
 
-        case CHEAT_TYPE_GAMESHARK_V3:
-          process_cheat_gs3(cheats + i);
-          break;
-
-        default:
-          break;
-      }
-    }
-  }
+      process_cheat_codebreaker(&cheats[i], 0x3ff ^ io_registers[REG_P1]);
+   }
 }
+
+void cheat_clear()
+{
+   int i;
+   for (i = 0; i < MAX_CHEATS; i++)
+   {
+      cheats[i].cheat_count = 0;
+      cheats[i].cheat_active = false;
+   }
+   cheat_master_hook = 0xffffffff;
+}
+
+void cheat_parse(unsigned index, const char *code)
+{
+   int pos = 0;
+   int codelen = strlen(code);
+   cheat_type *ch = &cheats[index];
+   char buf[1024];
+   
+   if (index >= MAX_CHEATS)
+      return;
+   if (codelen >= sizeof(buf))
+      return;
+
+   memcpy(buf, code, codelen+1);
+   
+   /* Init to a known good state */
+   ch->cheat_count = 0;
+   if (index > max_cheat)
+      max_cheat = index;
+
+   /* Replace all the non-hex chars to spaces */
+   for (pos = 0; pos < codelen; pos++)
+      if (!((buf[pos] >= '0' && buf[pos] <= '9') ||
+            (buf[pos] >= 'a' && buf[pos] <= 'f') ||
+            (buf[pos] >= 'A' && buf[pos] <= 'F')))
+         buf[pos] = ' ';
+
+   /* Try to parse as Code Breaker */
+   pos = 0;
+   while (pos < codelen)
+   {
+      u32 op1; u16 op2;
+      if (2 != sscanf(&buf[pos], "%08x %04hx", &op1, &op2))
+         break;
+      ch->codes[ch->cheat_count].address = op1;
+      ch->codes[ch->cheat_count++].value = op2;
+      pos += 13;
+      while (pos < codelen && buf[pos] == ' ')
+         pos++;
+      if (ch->cheat_count >= MAX_CHEAT_CODES)
+         break;
+   }
+   
+   if (pos >= codelen)
+   {
+      /* All codes were parsed! Process hook here */
+      ch->cheat_active = true;
+      update_hook_codebreaker(ch);
+      return;
+   }
+
+   /* TODO parse other types here */
+}
+
+

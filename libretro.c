@@ -639,8 +639,16 @@ bool retro_unserialize(const void* data, size_t size)
 
 void retro_cheat_reset(void)
 {
+   cheat_clear();
 }
-void retro_cheat_set(unsigned index, bool enabled, const char* code) {}
+
+void retro_cheat_set(unsigned index, bool enabled, const char* code)
+{
+   if (!enabled)
+      return;
+
+   cheat_parse(index, code);
+}
 
 static void extract_directory(char* buf, const char* path, size_t size)
 {

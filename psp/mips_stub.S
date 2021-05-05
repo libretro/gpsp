@@ -44,6 +44,7 @@
 .global init_emitter
 .global mips_lookup_pc
 .global smc_write
+.global mips_cheat_hook
 
 .global write_io_epilogue
 .global memory_map_read
@@ -253,6 +254,17 @@ mips_update_gba:
   restore_registers
 
   jr $ra                          # if not, go back to caller
+  nop
+
+
+# Processes cheats whenever we hit the master PC
+mips_cheat_hook:
+  sw $ra, REG_SAVE2($16)
+  save_registers
+  cfncall process_cheats, 8
+  lw $ra, REG_SAVE2($16)
+  restore_registers
+  jr $ra
   nop
 
 
@@ -649,6 +661,7 @@ fnptrs:
   .long set_cpu_mode                   # 5
   .long execute_spsr_restore_body      # 6
   .long execute_store_cpsr_body        # 7
+  .long process_cheats                 # 8
 
 #if !defined(HAVE_MMAP)
 

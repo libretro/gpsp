@@ -2236,6 +2236,12 @@ static void function_cc execute_swi(u32 pc)
   generate_indirect_branch_cycle_update(dual);                                \
 }                                                                             \
 
+#define thumb_process_cheats()                                                \
+  generate_function_call(process_cheats);
+
+#define arm_process_cheats()                                                  \
+  generate_function_call(process_cheats);
+
 #define thumb_swi()                                                           \
   generate_swi_hle_handler(opcode & 0xFF);                                    \
   generate_update_pc((pc + 2));                                               \

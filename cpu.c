@@ -1679,6 +1679,10 @@ arm_loop:
        collapse_flags();
        cycles_per_instruction = global_cycles_per_instruction;
 
+       /* Process cheats if we are about to execute the cheat hook */
+       if (pc == cheat_master_hook)
+          process_cheats();
+
        old_pc = pc;
 
        /* Execute ARM instruction */
@@ -3293,6 +3297,10 @@ skip_instruction:
 thumb_loop:
 
        collapse_flags();
+
+       /* Process cheats if we are about to execute the cheat hook */
+       if (pc == cheat_master_hook)
+          process_cheats();
 
        old_pc = pc;
 

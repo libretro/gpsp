@@ -230,7 +230,9 @@ u32 update_gba(void)
           update_gbc_sound(cpu_ticks);
           gbc_sound_update = 0;
 
-          process_cheats();
+          /* If there's no cheat hook, run on vblank! */
+          if (cheat_master_hook == ~0U)
+             process_cheats();
 
           vcount = 0;
           // We completed a frame, tell the dynarec to exit to the main thread

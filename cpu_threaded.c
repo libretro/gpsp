@@ -3303,6 +3303,11 @@ s32 translate_block_arm(u32 pc, translation_region_type
     block_data[block_data_position].block_offset = translation_ptr;
     arm_base_cycles();
 
+    if (pc == cheat_master_hook)
+    {
+      arm_process_cheats();
+    }
+
     translate_arm_instruction();
     block_data_position++;
 
@@ -3501,6 +3506,11 @@ s32 translate_block_thumb(u32 pc, translation_region_type
   {
     block_data[block_data_position].block_offset = translation_ptr;
     thumb_base_cycles();
+
+    if (pc == cheat_master_hook)
+    {
+      thumb_process_cheats();
+    }
 
     translate_thumb_instruction();
     block_data_position++;

@@ -31,6 +31,8 @@ u32 prepare_store_reg(u32 scratch_reg, u32 reg_index);
 void generate_load_reg(u32 ireg, u32 reg_index);
 void complete_store_reg(u32 scratch_reg, u32 reg_index);
 void complete_store_reg_pc_no_flags(u32 scratch_reg, u32 reg_index);
+void thumb_cheat_hook();
+void arm_cheat_hook();
 
 u32 arm_update_gba_arm(u32 pc);
 u32 arm_update_gba_thumb(u32 pc);
@@ -1875,6 +1877,12 @@ u32 execute_store_cpsr_body(u32 _cpsr, u32 store_mask, u32 address)
   generate_load_reg_pc(reg_a0, rs, 4);                                        \
   generate_indirect_branch_cycle_update(dual_thumb);                          \
 }                                                                             \
+
+#define thumb_process_cheats()                                                \
+  generate_function_call(thumb_cheat_hook);
+
+#define arm_process_cheats()                                                  \
+  generate_function_call(arm_cheat_hook);
 
 #define thumb_swi()                                                           \
   generate_swi_hle_handler(opcode & 0xFF, thumb);                             \

@@ -2380,7 +2380,6 @@ char gamepak_filename[512];
 
 u32 load_gamepak(const struct retro_game_info* info, const char *name)
 {
-   char cheats_filename[256];
    char *p;
 
    s32 file_size = load_gamepak_raw(name);
@@ -2422,9 +2421,6 @@ u32 load_gamepak(const struct retro_game_info* info, const char *name)
 
    if ((load_game_config_over(gamepak_title, gamepak_code, gamepak_maker)) == -1)
       load_game_config(gamepak_title, gamepak_code, gamepak_maker);
-
-   change_ext(gamepak_filename, cheats_filename, ".cht");
-   add_cheats(cheats_filename);
 
    return 0;
 }

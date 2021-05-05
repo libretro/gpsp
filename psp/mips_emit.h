@@ -44,6 +44,7 @@ void mips_indirect_branch_dual(u32 address);
 u32 execute_read_cpsr();
 u32 execute_read_spsr();
 void execute_swi(u32 pc);
+void mips_cheat_hook();
 
 u32 execute_spsr_restore(u32 address);
 void execute_store_cpsr(u32 new_cpsr, u32 store_mask);
@@ -2421,6 +2422,12 @@ u32 execute_store_cpsr_body(u32 _cpsr, u32 store_mask, u32 address)
   /*generate_load_pc(reg_a2, pc);*/                                           \
   generate_indirect_branch_cycle_update(dual);                                \
 }                                                                             \
+
+#define thumb_process_cheats()                                                \
+  generate_function_call(mips_cheat_hook);
+
+#define arm_process_cheats()                                                  \
+  generate_function_call(mips_cheat_hook);
 
 #ifdef TRACE_INSTRUCTIONS
   void trace_instruction(u32 pc)
