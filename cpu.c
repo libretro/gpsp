@@ -1024,7 +1024,7 @@ const u32 psr_masks[16] =
     memory_region_access_read_u32[_address >> 24]++;                          \
     memory_reads_u32++;                                                       \
   }                                                                           \
-  if(map)                                                                     \
+  if(_address < 0x10000000 && map)                                            \
   {                                                                           \
     dest = address32(map, _address & 0x7FFF);                                 \
   }                                                                           \
