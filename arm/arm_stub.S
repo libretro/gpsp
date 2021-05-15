@@ -67,14 +67,8 @@ _##symbol:
 #define MODE_SUPERVISOR   3
 
 
-#ifdef __ARM_ARCH_7A__
-  #define extract_u16(rd, rs) \
-    uxth rd, rs
-#else
-  #define extract_u16(rd, rs) \
-    bic  rd, rs, #0xff000000 ;\
-    bic  rd, rd, #0x00ff0000
-#endif
+#define extract_u16(rd, rs) \
+  uxth rd, rs
 
 @ Will load the register set from memory into the appropriate cached registers.
 @ See arm_emit.h for listing explanation.
@@ -777,12 +771,10 @@ lookup_pc:
 #define sign_extend_u32(reg)
 
 #define sign_extend_s8(reg)                                                  ;\
-  mov reg, reg, lsl #24                   /* shift reg into upper 8bits    */;\
-  mov reg, reg, asr #24                   /* shift down, sign extending    */;\
+  sxtb reg, reg
 
 #define sign_extend_s16(reg)                                                 ;\
-  mov reg, reg, lsl #16                   /* shift reg into upper 16bits   */;\
-  mov reg, reg, asr #16                   /* shift down, sign extending    */;\
+  sxth reg, reg
 
 #define execute_load_op_u8(load_op)                                          ;\
   mov r0, r0, lsl #17                                                        ;\
@@ -836,11 +828,11 @@ ext_load_##load_type:                                                        ;\
 
 .pool
 
-execute_load_builder(u8, 8, ldrneb, #0xF0000000)
-execute_load_builder(s8, 8, ldrnesb, #0xF0000000)
-execute_load_builder(u16, 16, ldrneh, #0xF0000001)
-execute_load_builder(s16, 16_signed, ldrnesh, #0xF0000001)
-execute_load_builder(u32, 32, ldrne, #0xF0000000)
+execute_load_builder(u8, 8, ldrb, #0xF0000000)
+execute_load_builder(s8, 8, ldrsb, #0xF0000000)
+execute_load_builder(u16, 16, ldrh, #0xF0000001)
+execute_load_builder(s16, 16_signed, ldrsh, #0xF0000001)
+execute_load_builder(u32, 32, ldr, #0xF0000003)
 
 .data
 
