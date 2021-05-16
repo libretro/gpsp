@@ -1239,12 +1239,10 @@ u32 execute_store_cpsr_body(u32 _cpsr, u32 store_mask, u32 address)
 
   #define emit_trace_instruction(pc)               \
     generate_save_flags();                         \
-    ARM_LDR_IMM(0, ARMREG_SP, reg_base, 34*4);     \
     ARM_STMDB_WB(0, ARMREG_SP, 0x500C);            \
     arm_load_imm_32bit(reg_a0, pc);                \
     generate_function_call(trace_instruction);     \
     ARM_LDMIA_WB(0, ARMREG_SP, 0x500C);            \
-    arm_load_imm_32bit(ARMREG_SP, (u32)reg);       \
     generate_restore_flags();
   #define emit_trace_thumb_instruction(pc)         \
     emit_trace_instruction(pc)

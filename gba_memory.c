@@ -3155,12 +3155,12 @@ static void init_memory_gamepak(void)
   }
   else
   {
-    map_region(read, 0x8000000, 0x8000000 + gamepak_size, 1024, gamepak_rom);
-    map_null(read, 0x8000000 + gamepak_size, 0xA000000);
-    map_region(read, 0xA000000, 0xA000000 + gamepak_size, 1024, gamepak_rom);
-    map_null(read, 0xA000000 + gamepak_size, 0xC000000);
-    map_region(read, 0xC000000, 0xC000000 + gamepak_size, 1024, gamepak_rom);
-    map_null(read, 0xC000000 + gamepak_size, 0xE000000);
+    /* Map the ROM using mirroring, not many games use it */
+    unsigned numblocks = gamepak_size >> 15;
+    map_region(read, 0x8000000, 0xA000000, numblocks, gamepak_rom);
+    map_region(read, 0xA000000, 0xC000000, numblocks, gamepak_rom);
+    map_region(read, 0xC000000, 0xD000000, numblocks, gamepak_rom);
+    /* Do not map D-E regions since they are also used for FLASH */
   }
 }
 
