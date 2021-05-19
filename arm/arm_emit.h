@@ -1657,8 +1657,9 @@ u32 execute_store_cpsr_body(u32 _cpsr, u32 store_mask, u32 address)
 /* Operation types: imm, mem_reg, mem_imm */
 
 #define thumb_load_pc_pool_const(reg_rd, value)                               \
-  generate_load_pc(reg_a0, (value));                                          \
-  generate_store_reg(reg_a0, reg_rd)
+  u32 rgdst = prepare_store_reg(reg_a0, reg_rd);                              \
+  generate_load_pc(rgdst, (value));                                           \
+  complete_store_reg(rgdst, reg_rd)
 
 #define thumb_access_memory_load(mem_type, _rd)                               \
   cycle_count += 2;                                                           \
