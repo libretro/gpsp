@@ -2,9 +2,6 @@ INCFLAGS   := -I$(CORE_DIR)/libretro -I$(CORE_DIR)/src
 
 SOURCES_ASM := $(CORE_DIR)/bios_data.S
 
-ifeq ($(HAVE_GRIFFIN), 1)
-SOURCES_C := $(CORE_DIR)/gpsp_griffin.c
-else
 SOURCES_C := $(CORE_DIR)/main.c \
 				 $(CORE_DIR)/cpu.c \
 				 $(CORE_DIR)/gba_memory.c \
@@ -17,7 +14,6 @@ SOURCES_C := $(CORE_DIR)/main.c \
 
 ifeq ($(HAVE_DYNAREC), 1)
 SOURCES_C += $(CORE_DIR)/cpu_threaded.c
-endif
 endif
 
 ifeq ($(HAVE_DYNAREC), 1)

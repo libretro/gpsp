@@ -1,5 +1,4 @@
 DEBUG=0
-HAVE_GRIFFIN=0
 FRONTEND_SUPPORTS_RGB565=1
 FORCE_32BIT_ARCH=0
 HAVE_MMAP=0
@@ -74,7 +73,7 @@ ifeq ($(platform), unix)
 		LIBM :=
 	endif
 	CFLAGS += $(FORCE_32BIT)
-	LDFLAGS := -Wl,--no-undefined
+	LDFLAGS += -Wl,--no-undefined
 	ifeq ($(HAVE_DYNAREC),1)
 		HAVE_MMAP = 1
 	endif
@@ -368,7 +367,7 @@ else ifneq (,$(findstring armv,$(platform)))
 	ifeq (,$(findstring no-dynarec,$(platform)))
 		HAVE_DYNAREC := 1
 	endif
-	LDFLAGS := -Wl,--no-undefined	
+	LDFLAGS += -Wl,--no-undefined
 
 # MIPS
 else ifeq ($(platform), mips32)
@@ -444,11 +443,6 @@ else
 	OPTIMIZE      := -O3 -DNDEBUG
 endif
 
-
-include Makefile.common
-
-OBJECTS := $(SOURCES_C:.c=.o) $(SOURCES_ASM:.S=.o)
-
 DEFINES := -DHAVE_STRINGS_H -DHAVE_STDINT_H -DHAVE_INTTYPES_H -D__LIBRETRO__ -DINLINE=inline -Wall
 
 ifeq ($(HAVE_DYNAREC), 1)
@@ -463,6 +457,9 @@ else ifeq ($(CPU_ARCH), x86_32)
 DEFINES += -DX86_ARCH
 endif
 
+include Makefile.common
+
+OBJECTS := $(SOURCES_C:.c=.o) $(SOURCES_ASM:.S=.o)
 
 WARNINGS_DEFINES =
 CODE_DEFINES =
