@@ -410,7 +410,7 @@ else ifeq ($(platform), rs90)
 	SHARED := -shared -nostdlib -Wl,--version-script=link.T
 	fpic := -fPIC -DPIC
 	CFLAGS += -fomit-frame-pointer -ffast-math -march=mips32 -mtune=mips32
-	HAVE_DYNAREC := 1
+	HAVE_DYNAREC := 0
 	CPU_ARCH := mips
 
 # GCW0 (OD and OD Beta)
