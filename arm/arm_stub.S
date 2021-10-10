@@ -79,8 +79,26 @@ _##symbol:
 #define IOREG_OFF        0x8D00
 
 
-#define extract_u16(rd, rs) \
+#if __ARM_ARCH >= 6
+#define extract_u16(rd, rs)                                                  ;\
   uxth rd, rs
+#else
+#define extract_u16(rd, rs)                                                  ;\
+  bic rd, rs, #0xff000000                                                    ;\
+  bic rd, rd, #0x00ff0000
+#endif
+
+#if __ARM_ARCH >= 6
+#define sat_u4(rd, rs, shift)                                                ;\
+  usat rd, #4, rs, shift
+#else
+#define sat_u4(rd, rs, shift)                                                ;\
+  mov rd, rs, shift                                                          ;\
+  bic rd, rd, rd, asr #31                                                    ;\
+  sub rd, rd, #15                                                            ;\
+  and rd, rd, rd, asr #31                                                    ;\
+  add rd, rd, #15
+#endif
 
 @ Will load the register set from memory into the appropriate cached registers.
 @ See arm_emit.h for listing explanation.
@@ -538,7 +556,7 @@ return_to_main:
 #define execute_store_builder(store_type, str_op, str_op16, load_op, tnum)   ;\
                                                                              ;\
 defsymbl(execute_store_u##store_type)                                        ;\
-  usat r2, #4, r0, asr #24                /* r2 contains [0-15]            */;\
+  sat_u4(r2, r0, asr #24)                 /* r2 contains [0-15]            */;\
   add r2, r2, #((STORE_TBL_OFF + 16*4*tnum) >> 2)    /* add table offset   */;\
   ldr pc, [reg_base, r2, lsl #2]          /* load handler addr             */;\
   nop                                                                        ;\
@@ -627,7 +645,7 @@ execute_store_builder(32, str,  str,  ldr,  2)
 @ This is a store that is executed in a strm case (so no SMC checks in-between)
 
 defsymbl(execute_store_u32_safe)
-  usat r2, #4, r0, asr #24
+  sat_u4(r2, r0, asr #24)
   add r2, r2, #((STORE_TBL_OFF + 16*4*3) >> 2)
   ldr pc, [reg_base, r2, lsl #2]
   nop
@@ -772,9 +790,9 @@ lookup_pc_arm:
 defsymbl(execute_load_##load_type)                                           ;\
 .if albits >= 1                                                              ;\
   ror r1, r0, #(albits)                   /* move alignment bits to MSB    */;\
-  usat r1, #4, r1, asr #(24-albits)       /* r1 contains [0-15]            */;\
+  sat_u4(r1, r1, asr #(24-albits))        /* r1 contains [0-15]            */;\
 .else                                                                        ;\
-  usat r1, #4, r0, asr #24                /* r1 contains [0-15]            */;\
+  sat_u4(r1, r0, asr #24)                 /* r1 contains [0-15]            */;\
 .endif                                                                       ;\
   add r1, r1, #((STORE_TBL_OFF + 16*4*tnum) >> 2)    /* add table offset   */;\
   ldr pc, [reg_base, r1, lsl #2]          /* load handler addr             */;\
