@@ -24,8 +24,10 @@
 #define BUFFER_SIZE_MASK   (BUFFER_SIZE - 1)
 
 #define GBA_SOUND_FREQUENCY   (64 * 1024)
+#define GBA_60HZ_RATE 16853760.0f /* 228*(272+960)*60 */
 
-#define GBC_BASE_RATE ((float)(16 * 1024 * 1024))
+// run GBA at 60Hz (~0.5% faster) to better match host display
+#define GBC_BASE_RATE GBA_60HZ_RATE
 
 typedef enum
 {
