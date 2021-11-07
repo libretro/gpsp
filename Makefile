@@ -458,6 +458,18 @@ else ifeq ($(platform), rs90)
 	HAVE_DYNAREC := 1
 	CPU_ARCH := mips
 
+# MIYOO
+else ifeq ($(platform), miyoo)
+	TARGET := $(TARGET_NAME)_libretro.so
+	CC = /opt/miyoo/usr/bin/arm-linux-gcc
+	CXX = /opt/miyoo/usr/bin/arm-linux-g++
+	AR = /opt/miyoo/usr/bin/arm-linux-ar
+	SHARED := -shared -nostdlib -Wl,--version-script=link.T
+	fpic := -fPIC -DPIC
+	CFLAGS += -fomit-frame-pointer -ffast-math -march=armv5te -mtune=arm926ej-s
+	HAVE_DYNAREC := 1
+	CPU_ARCH := arm
+
 # Windows
 else
 	TARGET := $(TARGET_NAME)_libretro.dll
