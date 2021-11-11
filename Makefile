@@ -461,9 +461,9 @@ else ifeq ($(platform), rs90)
 # MIYOO
 else ifeq ($(platform), miyoo)
 	TARGET := $(TARGET_NAME)_libretro.so
-   CC = /opt/miyoo/usr/bin/arm-linux-gcc
-   CXX = /opt/miyoo/usr/bin/arm-linux-g++
-   AR = /opt/miyoo/usr/bin/arm-linux-ar
+	CC = /opt/miyoo/usr/bin/arm-linux-gcc
+	CXX = /opt/miyoo/usr/bin/arm-linux-g++
+	AR = /opt/miyoo/usr/bin/arm-linux-ar
 	SHARED := -shared -nostdlib -Wl,--version-script=link.T
 	fpic := -fPIC -DPIC
 	CFLAGS += -fomit-frame-pointer -ffast-math -march=armv5te -mtune=arm926ej-s
