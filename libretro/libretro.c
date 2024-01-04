@@ -1075,6 +1075,8 @@ void* retro_get_memory_data(unsigned id)
 {
    if (id == RETRO_MEMORY_SAVE_RAM)
       return gamepak_backup;
+   else if (id == RETRO_MEMORY_SYSTEM_RAM)
+      return ewram;
 
    return NULL;
 }
@@ -1083,6 +1085,8 @@ size_t retro_get_memory_size(unsigned id)
 {
    if (id == RETRO_MEMORY_SAVE_RAM)
       return 0x20000;  /* Assume 128KiB, biggest possible save */
+   else if (id == RETRO_MEMORY_SYSTEM_RAM)
+      return 0x40000;
 
    return 0;
 }
