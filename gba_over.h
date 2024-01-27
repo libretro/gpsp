@@ -1560,7 +1560,7 @@ static const ini_t gbaover[] = {
       "POKE DUNGEON",              /* gamepak_title        */
       "B24J",                      /* gamepak_code         */
       "01",                        /* gamepak_maker        */
-      FLAGS_FLASH_128KB,           /* flags                */
+      0,                           /* flags                */
       0,                           /* idle_loop_target_pc  */
       0,                           /* translation_gate_target_1 */
       0,                           /* translation_gate_target_2 */
