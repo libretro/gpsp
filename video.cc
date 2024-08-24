@@ -960,6 +960,9 @@ static const u8 obj_dim_table[3][4][2] = {
 static u8 obj_priority_list[5][160][128];
 static u8 obj_priority_count[5][160];
 static u8 obj_alpha_count[160];
+static u8 oam_hijack;
+static u8 oam_line_hijack[160];
+static u16 obj_buf[240];
 
 typedef struct {
   s32 obj_x, obj_y;
@@ -1031,16 +1034,17 @@ static inline void render_obj_part_tile_Nbpp(
 // Same as above but optimized for full tiles
 template<typename dsttype, rendtype rdtype, bool is8bpp, bool hflip>
 static inline void render_obj_tile_Nbpp(u32 px_comb,
-  dsttype *dest_ptr, u32 tile_offset, u16 palette, const u16 *pal
+  dsttype *dest_ptr, u32 tile_offset, u16 palette, const u16 *pal, u8 sl_start = 0
 ) {
   const u8* tile_ptr = &vram[0x10000 + (tile_offset & 0x7FFF)];
   u32 px_attr = px_comb | palette | 0x100;  // Combine flags + high palette bit
-
+  
   if (is8bpp) {
     for (u32 j = 0; j < 2; j++) {
       u32 tilepix = eswap32(((u32*)tile_ptr)[hflip ? 1-j : j]);
       if (tilepix) {
-        for (u32 i = 0; i < 4; i++, dest_ptr++) {
+        // Increment sl_start here too in case first tilepix isn't blank
+        for (u32 i = 0; i < 4; i++, dest_ptr++, sl_start++) {
           u8 pval = hflip ? (tilepix >> (24 - i*8)) : (tilepix >> (i*8));
           if (pval) {
             if (rdtype == FULLCOLOR)
@@ -1057,10 +1061,29 @@ static inline void render_obj_tile_Nbpp(u32 px_comb,
               *dest_ptr = dest_ptr[240];
           }
         }
-      } else
-        dest_ptr += 4;
+      } else 
+        {
+        // As this half-row is blank, check the Object Buffer for pixels
+        for (u32 i = 0; i < 4; i++, dest_ptr++, sl_start++) {
+          //u8 curr_pos = (u16*)dest_ptr - get_screen_pixels();
+          if(obj_buf[sl_start]) {
+            if (rdtype == FULLCOLOR)
+              *dest_ptr = pal[(u8) obj_buf[sl_start]];
+            else if (rdtype == INDXCOLOR)
+              *dest_ptr = obj_buf[sl_start];
+            else if (rdtype == STCKCOLOR) {
+              if (*dest_ptr & 0x100)
+                *dest_ptr = obj_buf[sl_start] | ((*dest_ptr) & 0xFFFF0000);
+              else
+                *dest_ptr = obj_buf[sl_start] | ((*dest_ptr) << 16);
+            }
+            //*dest_ptr = obj_buf[sl_start];
+          }
+        }
+      }
     }
-  } else {
+   
+  }else {
     u32 tilepix = eswap32(*(u32*)tile_ptr);
     if (tilepix) {   // Can skip all pixels if the row is just transparent
       for (u32 i = 0; i < 8; i++, dest_ptr++) {
@@ -1097,11 +1120,12 @@ static void render_object(
   const u32 tile_bsize = is8bpp ? tile_size_8bpp : tile_size_4bpp;
   // Number of bytes to advance (or rewind) on the tile map
   const s32 tile_size_off = hflip ? -tile_bsize : tile_bsize;
+  u8 tile_off = 0;
 
   if (delta_x < 0) {      // Left part is outside of the screen/window.
     u32 offx = -delta_x;  // How many pixels did we skip from the object?
     s32 block_off = offx / 8;
-    u32 tile_off = offx % 8;
+    tile_off = offx % 8;
 
     // Skip the first object tiles (skips in the flip direction)
     tile_offset += block_off * tile_size_off;
@@ -1126,12 +1150,15 @@ static void render_object(
 
   // Render full tiles to the scan line.
   s32 num_tiles = cnt / 8;
+  // Work out where we need to start on the scanline
+  u8 scanline_start = (delta_x < 0 ? 8 - tile_off : delta_x);
   while (num_tiles--) {
     // Render full tiles
     render_obj_tile_Nbpp<stype, rdtype, is8bpp, hflip>(
-      px_comb, dst_ptr, tile_offset, palette, palptr);
+      px_comb, dst_ptr, tile_offset, palette, palptr, scanline_start);
     tile_offset += tile_size_off;
     dst_ptr += 8;
+    scanline_start +=8;
   }
 
   // Render any partial tile on the end
@@ -1515,6 +1542,11 @@ static void order_obj(u32 video_mode)
   u32 row;
   t_oam *oam_base = (t_oam*)oam_ram;
   u16 rend_cycles[160];
+  u8 obj_priority = 0;
+
+  // When we call order_obj, it means OAM has changed
+  // Reset the hijack counter and mark the obj_buffer as not yet filled
+  oam_hijack = 0;
 
   bool hblank_free = read_ioreg(REG_DISPCNT) & 0x20;
   u16 max_rend_cycles = !sprite_limit ? REND_CYC_MAX :
@@ -1524,6 +1556,9 @@ static void order_obj(u32 video_mode)
   memset(obj_priority_count, 0, sizeof(obj_priority_count));
   memset(obj_alpha_count, 0, sizeof(obj_alpha_count));
   memset(rend_cycles, 0, sizeof(rend_cycles));
+  // Let's also clear the hijack row flags
+  memset(oam_line_hijack, 0, sizeof(oam_line_hijack));
+  
 
   for(obj_num = 0; obj_num < 128; obj_num++)
   {
@@ -1560,6 +1595,7 @@ static void order_obj(u32 video_mode)
     // Double size for affine sprites with double bit set
     if(obj_attr0 & 0x200)
     {
+      //printf("OBJ %d is affine", obj_num);
       obj_height *= 2;
       obj_width *= 2;
     }
@@ -1570,7 +1606,17 @@ static void order_obj(u32 video_mode)
 
       if(((obj_x + obj_width) > 0) && (obj_x < 240))
       {
-        u32 obj_priority = (obj_attr2 >> 10) & 0x03;
+        // Let's check for OAM hijack here.  If detected for this object we'll turn on hijacking for all
+        // active objects from now on.
+        // This code needs further optimisation because ideally we only want to mark rows as hijacked
+        // for specific objects, but as it stands it will mark everything as hijacked from the first
+        // encounter onwards.
+        if(((obj_attr2 >> 10) & 0x03) < obj_priority)
+          {
+            oam_hijack = 1;
+            //printf("OBJ %d is hijacking, X %d, Y %d \n", obj_num, obj_x, obj_y);
+          }
+        obj_priority = (obj_attr2 >> 10) & 0x03;
         bool is_affine = obj_attr0 & 0x100;
         // Clip Y coord and height to the 0..159 interval
         u32 starty = MAX(obj_y, 0);
@@ -1588,6 +1634,10 @@ static void order_obj(u32 video_mode)
               obj_priority_list[obj_priority][row][cur_cnt] = obj_num;
               obj_priority_count[obj_priority][row] = cur_cnt + 1;
               rend_cycles[row] += cyccnt;
+              // Assignment probably quicker than comparison, so let's just set the line hijack every time
+              oam_line_hijack[row] = oam_hijack;
+              //if(oam_hijack)
+              //  printf("OAM Hijack Row: %d, Object: %d \n", row, obj_num);
               // Mark the row as having semi-transparent objects
               obj_alpha_count[row] = 1;
             }
@@ -1605,6 +1655,10 @@ static void order_obj(u32 video_mode)
               obj_priority_list[obj_priority][row][cur_cnt] = obj_num;
               obj_priority_count[obj_priority][row] = cur_cnt + 1;
               rend_cycles[row] += cyccnt;
+              // Assignment probably quicker than comparison->assignment, so let's just set the line hijack every time
+              oam_line_hijack[row] = oam_hijack;
+              //if(oam_hijack)
+              //  printf("OAM Hijack Row: %d, Object: %d \n", row, obj_num);
             }
           }
           break;
@@ -1847,6 +1901,35 @@ void tile_render_layers(u32 start, u32 end, dsttype *dst_ptr, u32 enabled_layers
   bool objlayer_is_1st_tgt = ((read_ioreg(REG_BLDCNT) >> 4) & 1) != 0;
   bool has_trans_obj = obj_alpha_count[read_ioreg(REG_VCOUNT)];
 
+  bool row_obj_hijack = oam_line_hijack[read_ioreg(REG_VCOUNT)];
+  u16 *obj_buf_ptr;
+  obj_buf_ptr = obj_buf;
+
+  // Clear the object buffer
+  memset(obj_buf, 0, sizeof(obj_buf));
+
+  // If this line has OAM hijack we need to clear the object buffer and fill it
+  // first so that the buffer is available to overlay pixels onto transparent OBJ areas
+  if (row_obj_hijack) {
+     // Fill it with Object Layers only, back to front
+     for (lnum = 0; lnum < layer_count; lnum++) {
+       u32 layer = layer_order[lnum];
+       bool is_obj = layer & 0x4;
+       if (is_obj && obj_enabled) {
+         //printf("Start: %d, End: %d, Row: %d \n", start, end, read_ioreg(REG_VCOUNT));
+         // TODO: Currently hard coded to full color only so no blending etc
+         // Need to give this a bit of thought - I think OBJs don't blend with each other so this is correct,
+         // But technically I think correct behaviour would be that the buffer pixels should blend with the background layer 
+         // below if it's enabled
+         render_scanline_objs<u16, INDXCOLOR>(layer & 0x3, start, end, obj_buf_ptr, &palette_ram_converted[0x100]);
+         //for(u8 c = 0; c < 240; c++) {
+         //   if(obj_buf[c])
+         //       printf("OBJ Mode: %d, OBJ Buf Pos: %d, OBJ Buf: %d, Start: %d, End: %d, Row: %d \n", objmode, c, obj_buf[c], start, end, read_ioreg(REG_VCOUNT));
+         //}
+       }
+     }
+  }
+
   for (lnum = 0; lnum < layer_count; lnum++) {
     u32 layer = layer_order[lnum];
     bool is_obj = layer & 0x4;
@@ -2033,6 +2116,35 @@ static void bitmap_render_layers(
   bool has_trans_obj = obj_alpha_count[read_ioreg(REG_VCOUNT)];
   bool objlayer_is_1st_tgt = (read_ioreg(REG_BLDCNT) & 0x10) != 0;
   bool bg2_is_1st_tgt = (read_ioreg(REG_BLDCNT) & 0x4) != 0;
+  u32 current_layer;
+  u32 layer_order_pos;  
+
+  bool row_obj_hijack = oam_line_hijack[read_ioreg(REG_VCOUNT)];
+  u16 *obj_buf_ptr;
+  obj_buf_ptr = obj_buf;
+
+  // Clear the object buffer
+  memset(obj_buf, 0, sizeof(obj_buf));
+
+  // If this line has OAM hijack we need to clear the object buffer and fill it
+  // first so that the buffer is available to overlay pixels onto transparent OBJ areas
+  if (row_obj_hijack) {
+     // Fill it with Object Layers only, back to front
+     for (layer_order_pos = 0; layer_order_pos < layer_count; layer_order_pos++) {
+       current_layer = layer_order[layer_order_pos];
+       bool is_obj = current_layer & 0x4;
+       bool obj_enabled = enable_flags & 0x10;
+       if (is_obj && obj_enabled) {
+         //printf("Start: %d, End: %d, Row: %d \n", start, end, REG_VCOUNT);
+         // TODO: Currently hard coded to full color only so no blending etc
+         // Need to give this a bit of thought - I think OBJs don't blend with each other so this is correct,
+         // But technically I think correct behaviour would be that the buffer pixels should blend with the background layer 
+         // below if it's enabled
+         render_scanline_objs<dsttype, FULLCOLOR>(current_layer & 0x3, start, end, obj_buf_ptr, &palette_ram_converted[0x100]);
+       }
+     }
+  }  
+
 
   // Fill in the renderers for a layer based on the mode type,
   static const bitmap_layer_render_struct renderers[3][2] =
@@ -2049,9 +2161,6 @@ static void bitmap_render_layers(
   unsigned modeidx = (dispcnt & 0x07) - 3;
   const bitmap_layer_render_struct *mode_rend = &renderers[modeidx][mmode];
   const bitmap_layer_render_struct *idxm_rend = &idx32_bmrend[modeidx][mmode];
-
-  u32 current_layer;
-  u32 layer_order_pos;
 
   fill_line_background<bgmode, dsttype>(start, end, scanline);
 
@@ -2335,5 +2444,3 @@ void update_scanline(void)
     }
   }
 }
-
-
