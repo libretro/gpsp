@@ -1917,10 +1917,7 @@ void tile_render_layers(u32 start, u32 end, dsttype *dst_ptr, u32 enabled_layers
        bool is_obj = layer & 0x4;
        if (is_obj && obj_enabled) {
          //printf("Start: %d, End: %d, Row: %d \n", start, end, read_ioreg(REG_VCOUNT));
-         // TODO: Currently hard coded to full color only so no blending etc
-         // Need to give this a bit of thought - I think OBJs don't blend with each other so this is correct,
-         // But technically I think correct behaviour would be that the buffer pixels should blend with the background layer 
-         // below if it's enabled
+         // Use u16/INDXCOLOR mode to give us best flexibility when replacing pixels across all modes 
          render_scanline_objs<u16, INDXCOLOR>(layer & 0x3, start, end, obj_buf_ptr, &palette_ram_converted[0x100]);
          //for(u8 c = 0; c < 240; c++) {
          //   if(obj_buf[c])
