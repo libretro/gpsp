@@ -861,6 +861,7 @@ static const ini_t gbaover[] = {
       0,                           /* translation_gate_target_2 */
       0,                           /* translation_gate_target_3 */
    },
+   {
       // Mario Tennis Advance (J)
       "MARIOTENNISA",              /* gamepak_title        */
       "BTMJ",                      /* gamepak_code         */
@@ -871,6 +872,7 @@ static const ini_t gbaover[] = {
       0,                           /* translation_gate_target_2 */
       0,                           /* translation_gate_target_3 */
    },
+   {
       // Mario Tennis: Power Tour (U/A)
       "MARIOTENNISA",              /* gamepak_title        */
       "BTME",                      /* gamepak_code         */
