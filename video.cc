@@ -1085,10 +1085,10 @@ static inline void render_obj_tile_Nbpp(u32 px_comb,
    
   }else {
     u32 tilepix = eswap32(*(u32*)tile_ptr);
+    const u16 *subpal = &pal[palette];
     if (tilepix) {   // Can skip all pixels if the row is just transparent
       for (u32 i = 0; i < 8; i++, dest_ptr++) {
         u8 pval = (hflip ? (tilepix >> ((7-i)*4)) : (tilepix >> (i*4))) & 0xF;
-        const u16 *subpal = &pal[palette];
         if (pval) {
           if (rdtype == FULLCOLOR)
             *dest_ptr = subpal[pval];
@@ -1104,7 +1104,26 @@ static inline void render_obj_tile_Nbpp(u32 px_comb,
             *dest_ptr = dest_ptr[240];
         }
       }
-    }
+    } else 
+        {
+        // As this half-row is blank, check the Object Buffer for pixels
+        for (u32 i = 0; i < 8; i++, dest_ptr++, sl_start++) {
+          //u8 curr_pos = (u16*)dest_ptr - get_screen_pixels();
+          if(obj_buf[sl_start]) {
+            if (rdtype == FULLCOLOR)
+              *dest_ptr = subpal[(u8) obj_buf[sl_start]];
+            else if (rdtype == INDXCOLOR)
+              *dest_ptr = obj_buf[sl_start];
+            else if (rdtype == STCKCOLOR) {
+              if (*dest_ptr & 0x100)
+                *dest_ptr = obj_buf[sl_start] | ((*dest_ptr) & 0xFFFF0000);
+              else
+                *dest_ptr = obj_buf[sl_start] | ((*dest_ptr) << 16);
+            }
+            //*dest_ptr = obj_buf[sl_start];
+          }
+        }
+      }
   }
 }
 
@@ -1917,7 +1936,10 @@ void tile_render_layers(u32 start, u32 end, dsttype *dst_ptr, u32 enabled_layers
        bool is_obj = layer & 0x4;
        if (is_obj && obj_enabled) {
          //printf("Start: %d, End: %d, Row: %d \n", start, end, read_ioreg(REG_VCOUNT));
-         // Use u16/INDXCOLOR mode to give us best flexibility when replacing pixels across all modes 
+         // TODO: Currently hard coded to full color only so no blending etc
+         // Need to give this a bit of thought - I think OBJs don't blend with each other so this is correct,
+         // But technically I think correct behaviour would be that the buffer pixels should blend with the background layer 
+         // below if it's enabled
          render_scanline_objs<u16, INDXCOLOR>(layer & 0x3, start, end, obj_buf_ptr, &palette_ram_converted[0x100]);
          //for(u8 c = 0; c < 240; c++) {
          //   if(obj_buf[c])
@@ -2133,7 +2155,10 @@ static void bitmap_render_layers(
        bool obj_enabled = enable_flags & 0x10;
        if (is_obj && obj_enabled) {
          //printf("Start: %d, End: %d, Row: %d \n", start, end, REG_VCOUNT);
-         // Use u16/INDXCOLOR mode to give us best flexibility when replacing pixels across all modes 
+         // TODO: Currently hard coded to full color only so no blending etc
+         // Need to give this a bit of thought - I think OBJs don't blend with each other so this is correct,
+         // But technically I think correct behaviour would be that the buffer pixels should blend with the background layer 
+         // below if it's enabled
          render_scanline_objs<dsttype, FULLCOLOR>(current_layer & 0x3, start, end, obj_buf_ptr, &palette_ram_converted[0x100]);
        }
      }
