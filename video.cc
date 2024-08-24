@@ -2133,10 +2133,7 @@ static void bitmap_render_layers(
        bool obj_enabled = enable_flags & 0x10;
        if (is_obj && obj_enabled) {
          //printf("Start: %d, End: %d, Row: %d \n", start, end, REG_VCOUNT);
-         // TODO: Currently hard coded to full color only so no blending etc
-         // Need to give this a bit of thought - I think OBJs don't blend with each other so this is correct,
-         // But technically I think correct behaviour would be that the buffer pixels should blend with the background layer 
-         // below if it's enabled
+         // Use u16/INDXCOLOR mode to give us best flexibility when replacing pixels across all modes 
          render_scanline_objs<dsttype, FULLCOLOR>(current_layer & 0x3, start, end, obj_buf_ptr, &palette_ram_converted[0x100]);
        }
      }
