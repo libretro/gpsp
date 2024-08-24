@@ -1106,7 +1106,7 @@ static inline void render_obj_tile_Nbpp(u32 px_comb,
       }
     } else 
         {
-        // As this half-row is blank, check the Object Buffer for pixels
+        // As this full-row is blank, check the Object Buffer for pixels
         for (u32 i = 0; i < 8; i++, dest_ptr++, sl_start++) {
           //u8 curr_pos = (u16*)dest_ptr - get_screen_pixels();
           if(obj_buf[sl_start]) {
@@ -1927,7 +1927,7 @@ void tile_render_layers(u32 start, u32 end, dsttype *dst_ptr, u32 enabled_layers
   // Clear the object buffer
   memset(obj_buf, 0, sizeof(obj_buf));
 
-  // If this line has OAM hijack we need to clear the object buffer and fill it
+  // If this line has OAM hijack we need to fill the buffer with OBJ layers
   // first so that the buffer is available to overlay pixels onto transparent OBJ areas
   if (row_obj_hijack) {
      // Fill it with Object Layers only, back to front
@@ -1936,10 +1936,7 @@ void tile_render_layers(u32 start, u32 end, dsttype *dst_ptr, u32 enabled_layers
        bool is_obj = layer & 0x4;
        if (is_obj && obj_enabled) {
          //printf("Start: %d, End: %d, Row: %d \n", start, end, read_ioreg(REG_VCOUNT));
-         // TODO: Currently hard coded to full color only so no blending etc
-         // Need to give this a bit of thought - I think OBJs don't blend with each other so this is correct,
-         // But technically I think correct behaviour would be that the buffer pixels should blend with the background layer 
-         // below if it's enabled
+         // Render to u16/INDXCOLOR to allow us to cover all render types when substituting pixels 
          render_scanline_objs<u16, INDXCOLOR>(layer & 0x3, start, end, obj_buf_ptr, &palette_ram_converted[0x100]);
          //for(u8 c = 0; c < 240; c++) {
          //   if(obj_buf[c])
@@ -2145,7 +2142,7 @@ static void bitmap_render_layers(
   // Clear the object buffer
   memset(obj_buf, 0, sizeof(obj_buf));
 
-  // If this line has OAM hijack we need to clear the object buffer and fill it
+  // If this line has OAM hijack we need to fill the buffer with OBJ layers 
   // first so that the buffer is available to overlay pixels onto transparent OBJ areas
   if (row_obj_hijack) {
      // Fill it with Object Layers only, back to front
@@ -2155,10 +2152,7 @@ static void bitmap_render_layers(
        bool obj_enabled = enable_flags & 0x10;
        if (is_obj && obj_enabled) {
          //printf("Start: %d, End: %d, Row: %d \n", start, end, REG_VCOUNT);
-         // TODO: Currently hard coded to full color only so no blending etc
-         // Need to give this a bit of thought - I think OBJs don't blend with each other so this is correct,
-         // But technically I think correct behaviour would be that the buffer pixels should blend with the background layer 
-         // below if it's enabled
+         // Render to u16/INDXCOLOR to allow us to cover all render types when substituting pixels 
          render_scanline_objs<dsttype, FULLCOLOR>(current_layer & 0x3, start, end, obj_buf_ptr, &palette_ram_converted[0x100]);
        }
      }
