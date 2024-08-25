@@ -2286,6 +2286,7 @@ void update_scanline(void)
 {
   u32 pitch = get_screen_pitch();
   u16 dispcnt = read_ioreg(REG_DISPCNT);
+  u16 grnswp = read_ioreg(REG_GRNSWP);
   u32 vcount = read_ioreg(REG_VCOUNT);
   u16 *screen_offset = get_screen_pixels() + (vcount * pitch);
   u32 video_mode = dispcnt & 0x07;
@@ -2309,6 +2310,21 @@ void update_scanline(void)
   else
     render_scanline_window(screen_offset);
 
+  // Check for Undocumented Green Swap screen mode
+  if (grnswp) {
+    // Apply Green Swap to scanline in place for speed
+    for (u8 x = 0; x < pitch; x += 4) {
+        screen_offset[x] = screen_offset[x] & (M_COLOR_RED | M_COLOR_BLUE);
+        screen_offset[x] |= screen_offset[x + 1] & M_COLOR_GREEN;
+        screen_offset[x + 1] = screen_offset[x + 1] & (M_COLOR_RED | M_COLOR_BLUE);
+        screen_offset[x + 1] |= screen_offset[x] & M_COLOR_GREEN;
+        screen_offset[x + 2] = screen_offset[x + 2] & (M_COLOR_RED | M_COLOR_BLUE);
+        screen_offset[x + 2] |= screen_offset[x + 3] & M_COLOR_GREEN;
+        screen_offset[x + 3] = screen_offset[x + 3] & (M_COLOR_RED | M_COLOR_BLUE);
+        screen_offset[x + 3] |= screen_offset[x + 2] & M_COLOR_GREEN;
+    }
+  }
+  
   // Mode 0 does not use any affine params at all.
   if (video_mode) {
     // Account for vertical mosaic effect, by correcting affine references.
