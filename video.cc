@@ -91,10 +91,10 @@ typedef struct
 #define RENDER_ALPHA    3
 
 // GRNSWP colors
-#define M_COLOR_RED   0x000000FF
-#define M_COLOR_GREEN 0x0000FF00
-#define M_COLOR_BLUE  0x00FF0000
-#define M_COLOR_ALPHA 0xFF000000
+#define M_COLOR_RED   0x001F
+#define M_COLOR_GREEN 0x07E0
+#define M_COLOR_BLUE  0xF800
+#define M_COLOR_ALPHA 0x0000
 
 // Byte lengths of complete tiles and tile rows in 4bpp and 8bpp.
 
