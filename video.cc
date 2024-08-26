@@ -91,9 +91,9 @@ typedef struct
 #define RENDER_ALPHA    3
 
 // GRNSWP colors
-#define M_COLOR_RED   0x001F
+#define M_COLOR_RED   0xF800
 #define M_COLOR_GREEN 0x07E0
-#define M_COLOR_BLUE  0xF800
+#define M_COLOR_BLUE  0x001F
 #define M_COLOR_ALPHA 0x0000
 
 // Byte lengths of complete tiles and tile rows in 4bpp and 8bpp.
@@ -2317,16 +2317,19 @@ void update_scanline(void)
 
   // Check for Undocumented Green Swap screen mode
   if (grnswp) {
+    u16 swapbuffer = 0;
     // Apply Green Swap to scanline in place for speed
     for (u8 x = 0; x < pitch; x += 4) {
+        swapbuffer = screen_offset[x];
         screen_offset[x] = screen_offset[x] & (M_COLOR_RED | M_COLOR_BLUE);
         screen_offset[x] |= screen_offset[x + 1] & M_COLOR_GREEN;
         screen_offset[x + 1] = screen_offset[x + 1] & (M_COLOR_RED | M_COLOR_BLUE);
-        screen_offset[x + 1] |= screen_offset[x] & M_COLOR_GREEN;
+        screen_offset[x + 1] |= swapbuffer & M_COLOR_GREEN;
+        swapbuffer = screen_offset[x + 2];
         screen_offset[x + 2] = screen_offset[x + 2] & (M_COLOR_RED | M_COLOR_BLUE);
         screen_offset[x + 2] |= screen_offset[x + 3] & M_COLOR_GREEN;
         screen_offset[x + 3] = screen_offset[x + 3] & (M_COLOR_RED | M_COLOR_BLUE);
-        screen_offset[x + 3] |= screen_offset[x + 2] & M_COLOR_GREEN;
+        screen_offset[x + 3] |= swapbuffer & M_COLOR_GREEN;
     }
   }
   
