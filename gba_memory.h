@@ -246,7 +246,8 @@ extern char gamepak_filename[512];
 cpu_alert_type dma_transfer(unsigned dma_chan, int *cycles);
 u8 *memory_region(u32 address, u32 *memory_limit);
 u32 load_gamepak(const struct retro_game_info* info, const char *name,
-                 int force_rtc, int force_rumble, int force_serial);
+                 int force_rtc, int force_rumble, int force_serial,
+                 int force_flash_size);
 s32 load_bios(char *name);
 void init_memory(void);
 void init_gamepak_buffer(void);

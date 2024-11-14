@@ -94,6 +94,7 @@ int sprite_limit = 1;
 
 static int rtc_mode = FEAT_AUTODETECT;
 static int rumble_mode = FEAT_AUTODETECT;
+static int flash_size_setting = FEAT_AUTODETECT;
 static int serial_setting = SERIAL_MODE_AUTO;
 
 u32 idle_loop_target_pc = 0xFFFFFFFF;
@@ -905,6 +906,18 @@ static void check_variables(bool started_from_load)
         else
            rumble_mode = FEAT_AUTODETECT;
      }
+
+     var.key                = "gpsp_flash_size";
+     var.value              = 0;
+     if (environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &var) && var.value)
+     {
+        if (!strcmp(var.value, "64kb"))
+           flash_size_setting = FLASH_SIZE_64KB;
+        else if (!strcmp(var.value, "128kb"))
+           flash_size_setting = FLASH_SIZE_128KB;
+        else
+           flash_size_setting = FEAT_AUTODETECT;
+     }
    }
 
    var.key                = "gpsp_sprlim";
@@ -1108,7 +1121,7 @@ bool retro_load_game(const struct retro_game_info* info)
    }
 
    memset(gamepak_backup, 0xff, sizeof(gamepak_backup));
-   if (load_gamepak(info, info->path, rtc_mode, rumble_mode, serial_setting) != 0)
+   if (load_gamepak(info, info->path, rtc_mode, rumble_mode, serial_setting, flash_size_setting) != 0)
    {
       error_msg("Could not load the game file.");
       return false;
