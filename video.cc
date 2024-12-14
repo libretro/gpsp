@@ -1472,6 +1472,10 @@ void render_scanline_objs(
   u32 objcnt = obj_priority_count[priority][vcount];
   u8 *objlist = obj_priority_list[priority][vcount];
 
+  // Clear the object buffer for Priority 0
+  if(priority == 0)
+    memset(obj_buf, 0, sizeof(obj_buf));
+
   // Render all the visible objects for this priority (back to front)
   for (objn = objcnt-1; objn >= 0; objn--) {
     // Objects in the list are pre-filtered and sorted in the appropriate order
