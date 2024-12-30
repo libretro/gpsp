@@ -137,6 +137,18 @@ struct retro_core_option_definition option_defs_us[] = {
       "auto"
    },
    {
+      "gpsp_flash_size",
+      "Save flash size",
+      "Sets the size of the flash memory for the emulated cartridge. Autodetect uses a ROM database that works with most commercial titles. You might want to force a particular size when using homebrew or ROM hacks that support or require it.",
+      {
+         { "auto", NULL },
+         { "64kb",  NULL },
+         { "128kb", NULL },
+         { NULL, NULL },
+      },
+      "auto"
+   },
+   {
       "gpsp_frameskip",
       "Frameskip",
       "Skip frames to avoid audio buffer under-run (crackling). Improves performance at the expense of visual smoothness. 'Auto' skips frames when advised by the frontend. 'Auto (Threshold)' utilises the 'Frameskip Threshold (%)' setting. 'Fixed Interval' utilises the 'Frameskip Interval' setting.",
