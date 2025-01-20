@@ -2541,37 +2541,40 @@ static s32 load_gamepak_raw(const char *name)
 }
 
 u32 load_gamepak(const struct retro_game_info* info, const char *name,
-                 int force_rtc, int force_rumble, int force_serial)
+                 int force_rtc, int force_rumble, int force_serial,
+                 int force_flash_size)
 {
-   gamepak_info_t gpinfo;
+  gamepak_info_t gpinfo;
 
-   if (load_gamepak_raw(name))
-      return -1;
+  if (load_gamepak_raw(name))
+    return -1;
 
-   // Buffer 0 always has the first 1MB chunk of the ROM
-   memset(&gpinfo, 0, sizeof(gpinfo));
-   memcpy(gpinfo.gamepak_title, &gamepak_buffers[0][0xA0], 12);
-   memcpy(gpinfo.gamepak_code,  &gamepak_buffers[0][0xAC],  4);
-   memcpy(gpinfo.gamepak_maker, &gamepak_buffers[0][0xB0],  2);
+  // Buffer 0 always has the first 1MB chunk of the ROM
+  memset(&gpinfo, 0, sizeof(gpinfo));
+  memcpy(gpinfo.gamepak_title, &gamepak_buffers[0][0xA0], 12);
+  memcpy(gpinfo.gamepak_code,  &gamepak_buffers[0][0xAC],  4);
+  memcpy(gpinfo.gamepak_maker, &gamepak_buffers[0][0xB0],  2);
 
-   idle_loop_target_pc = 0xFFFFFFFF;
-   translation_gate_targets = 0;
-   flash_device_id = FLASH_DEVICE_MACRONIX_64KB;
-   flash_bank_cnt = FLASH_SIZE_64KB;
-   rtc_enabled = false;
-   rumble_enabled = false;
-   backup_type_reset = BACKUP_UNKN;
-   serial_mode = force_serial;
+  idle_loop_target_pc = 0xFFFFFFFF;
+  translation_gate_targets = 0;
+  flash_device_id = FLASH_DEVICE_MACRONIX_64KB;
+  flash_bank_cnt = FLASH_SIZE_64KB;
+  rtc_enabled = false;
+  rumble_enabled = false;
+  backup_type_reset = BACKUP_UNKN;
+  serial_mode = force_serial;
 
-   load_game_config_over(&gpinfo);
+  load_game_config_over(&gpinfo);
 
-   // Forced RTC / Rumble modes, override the autodetect logic.
-   if (force_rtc != FEAT_AUTODETECT)
-      rtc_enabled = (force_rtc == FEAT_ENABLE);
-   if (force_rumble != FEAT_AUTODETECT)
-      rumble_enabled = (force_rumble == FEAT_ENABLE);
+  // Forced RTC / Rumble / Flash modes, override the autodetect logic.
+  if (force_rtc != FEAT_AUTODETECT)
+    rtc_enabled = (force_rtc == FEAT_ENABLE);
+  if (force_rumble != FEAT_AUTODETECT)
+    rumble_enabled = (force_rumble == FEAT_ENABLE);
+  if (force_flash_size != FEAT_AUTODETECT)
+    flash_bank_cnt = force_flash_size;
 
-   return 0;
+  return 0;
 }
 
 s32 load_bios(char *name)
