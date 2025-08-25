@@ -39,6 +39,11 @@ ifeq ($(FORCE_32BIT_ARCH),1)
 	FORCE_32BIT := -m32
 endif
 
+# check if user compiles a 60 FPS overclock version
+ifeq ($(OVERCLOCK_60FPS),1)
+	CFLAGS += -DOVERCLOCK_60FPS
+endif
+
 # system platform
 system_platform = unix
 ifeq ($(shell uname -a),)
