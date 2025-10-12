@@ -92,12 +92,6 @@ typedef struct
 #define RENDER_COL32    2
 #define RENDER_ALPHA    3
 
-// GRNSWP colors
-#define M_COLOR_RED   0xF800
-#define M_COLOR_GREEN 0x07E0
-#define M_COLOR_BLUE  0x001F
-#define M_COLOR_ALPHA 0x0000
-
 // Byte lengths of complete tiles and tile rows in 4bpp and 8bpp.
 
 #define tile_width_4bpp   4
@@ -1092,7 +1086,6 @@ static inline void render_obj_tile_Nbpp(u32 px_comb,
               else
                 *dest_ptr = obj_buf[sl_start] | ((*dest_ptr) << 16);
             }
-            //*dest_ptr = obj_buf[sl_start];
           }
         }
       }
@@ -1139,7 +1132,6 @@ static inline void render_obj_tile_Nbpp(u32 px_comb,
               else
                 *dest_ptr = obj_buf[sl_start] | ((*dest_ptr) << 16);
             }
-            //*dest_ptr = obj_buf[sl_start];
           }
         }
       }
@@ -1601,10 +1593,6 @@ void render_scanline_objs(
   u32 objcnt = obj_priority_count[priority][vcount];
   u8 *objlist = obj_priority_list[priority][vcount];
 
-  // Clear the object buffer for Priority 0
-  //if(priority == 0)
-  //  memset(obj_buf, 0, sizeof(obj_buf));
-
   // Render all the visible objects for this priority (back to front)
   for (objn = objcnt-1; objn >= 0; objn--) {
     // Objects in the list are pre-filtered and sorted in the appropriate order
@@ -1681,17 +1669,6 @@ void render_scanline_objs(
         render_sprite<stype, rdtype, false, false>(
           &obji, is_affine, start, end, scanline, pxcomb, palptr);
     }
-    
-    // Clear the hijack buffer for this row now that we've rendered the first hijack OBJ encountered
-    // This should fix issues with transparency on higher priority OBJs in the order
-    //if((oam_line_hijack[vcount] == objoff) && objoff > 0) {
-        //printf("OBJ %d has caused the OBJ Buffer to clear, clearing %d bytes \n", objoff, sizeof(obj_buf));
-        // oam_line_hijack[vcount] = 0;
-        // Clear the object buffer
-        // memset(obj_buf, 0, sizeof(obj_buf));
-
-    //}
-
   }
 }
 
@@ -2104,10 +2081,6 @@ void tile_render_layers(u32 start, u32 end, dsttype *dst_ptr, u32 enabled_layers
        render_scanline_objs_oam_order<u16, INDXCOLOR>(start, end, obj_buf_ptr, &palette_ram_converted[0x100], row_obj_hijack);
        // Re-enable hijacking behavior for normal rendering
        rendering_obj_buffer = false;
-       //for(u8 c = 0; c < 240; c++) {
-       //   if(obj_buf[c])
-       //       printf("OBJ Mode: %d, OBJ Buf Pos: %d, OBJ Buf: %d, Start: %d, End: %d, Row: %d \n", objmode, c, obj_buf[c], start, end, read_ioreg(REG_VCOUNT));
-       //}
      }
   }
 
@@ -2572,7 +2545,6 @@ void update_scanline(void)
 {
   u32 pitch = get_screen_pitch();
   u16 dispcnt = read_ioreg(REG_DISPCNT);
-  u16 grnswp = read_ioreg(REG_GRNSWP);
   u32 vcount = read_ioreg(REG_VCOUNT);
   u16 *screen_offset = get_screen_pixels() + (vcount * pitch);
   u32 video_mode = dispcnt & 0x07;
@@ -2595,24 +2567,6 @@ void update_scanline(void)
     memset(screen_offset, 0xff, 240*sizeof(u16));
   else
     render_scanline_window(screen_offset);
-
-  // Check for Undocumented Green Swap screen mode
-  if (grnswp) {
-    u16 swapbuffer = 0;
-    // Apply Green Swap to scanline in place for speed
-    for (u8 x = 0; x < pitch; x += 4) {
-        swapbuffer = screen_offset[x];
-        screen_offset[x] = screen_offset[x] & (M_COLOR_RED | M_COLOR_BLUE);
-        screen_offset[x] |= screen_offset[x + 1] & M_COLOR_GREEN;
-        screen_offset[x + 1] = screen_offset[x + 1] & (M_COLOR_RED | M_COLOR_BLUE);
-        screen_offset[x + 1] |= swapbuffer & M_COLOR_GREEN;
-        swapbuffer = screen_offset[x + 2];
-        screen_offset[x + 2] = screen_offset[x + 2] & (M_COLOR_RED | M_COLOR_BLUE);
-        screen_offset[x + 2] |= screen_offset[x + 3] & M_COLOR_GREEN;
-        screen_offset[x + 3] = screen_offset[x + 3] & (M_COLOR_RED | M_COLOR_BLUE);
-        screen_offset[x + 3] |= swapbuffer & M_COLOR_GREEN;
-    }
-  }
   
   // Mode 0 does not use any affine params at all.
   if (video_mode) {
