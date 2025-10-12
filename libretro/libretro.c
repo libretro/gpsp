@@ -91,6 +91,7 @@ struct retro_perf_callback perf_cb;
 int dynarec_enable;
 boot_mode selected_boot_mode = boot_game;
 int sprite_limit = 1;
+int oam_hijacking_enabled = 0;  // Default to disabled
 
 static int rtc_mode = FEAT_AUTODETECT;
 static int rumble_mode = FEAT_AUTODETECT;
@@ -916,6 +917,17 @@ static void check_variables(bool started_from_load)
          sprite_limit = 1;
       else if (strcmp(var.value, "enabled") == 0)
          sprite_limit = 0;
+   }
+
+   var.key                = "gpsp_oam_hijack";
+   var.value              = 0;
+
+   if (environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &var) && var.value)
+   {
+      if (strcmp(var.value, "disabled") == 0)
+         oam_hijacking_enabled = 0;
+      else if (strcmp(var.value, "enabled") == 0)
+         oam_hijacking_enabled = 1;
    }
 
    var.key                = "gpsp_frameskip";
