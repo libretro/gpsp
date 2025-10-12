@@ -1757,7 +1757,7 @@ static void order_obj(u32 video_mode)
         
         // Check if this specific object is hijacking the priority order
         // Don't mark wrap-around objects as hijacking to avoid out-of-bounds issues  
-        if(oam_hijacking_enabled && (obj_priority < highest_priority) && obj_num != 4)
+        if(oam_hijacking_enabled && (obj_priority < highest_priority))
           {
             // This object is hijacking - set oam_hijack to this object's number
             oam_hijack = obj_num;
