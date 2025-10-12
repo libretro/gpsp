@@ -22,6 +22,8 @@ extern "C" {
   #include "common.h"
 }
 
+extern int oam_hijacking_enabled;  // Core option for OAM hijacking
+
 u16* gba_screen_pixels = NULL;
 
 #define get_screen_pixels()   gba_screen_pixels
@@ -90,6 +92,11 @@ typedef struct
 #define RENDER_COL32    2
 #define RENDER_ALPHA    3
 
+// GRNSWP colors
+#define M_COLOR_RED   0xF800
+#define M_COLOR_GREEN 0x07E0
+#define M_COLOR_BLUE  0x001F
+#define M_COLOR_ALPHA 0x0000
 
 // Byte lengths of complete tiles and tile rows in 4bpp and 8bpp.
 
@@ -962,13 +969,16 @@ static u8 obj_priority_count[5][160];
 static u8 obj_alpha_count[160];
 static u8 oam_hijack;
 static u8 oam_line_hijack[160];
+static u8 obj_hijack_flags[160][128];  // Track which objects are hijacking on each scanline
 static u16 obj_buf[240];
+static bool rendering_obj_buffer = false;  // Flag to disable hijacking when creating obj buffer
 
 typedef struct {
   s32 obj_x, obj_y;
   s32 obj_w, obj_h;
   u32 attr1, attr2;
   bool is_double;
+  u8 objnum;
 } t_sprite;
 
 // Renders a tile row (8 pixels) for a regular (non-affine) object/sprite.
@@ -1034,10 +1044,11 @@ static inline void render_obj_part_tile_Nbpp(
 // Same as above but optimized for full tiles
 template<typename dsttype, rendtype rdtype, bool is8bpp, bool hflip>
 static inline void render_obj_tile_Nbpp(u32 px_comb,
-  dsttype *dest_ptr, u32 tile_offset, u16 palette, const u16 *pal, u8 sl_start = 0
+  dsttype *dest_ptr, u32 tile_offset, u16 palette, const u16 *pal, u8 sl_start = 0, u8 objnum = 0
 ) {
   const u8* tile_ptr = &vram[0x10000 + (tile_offset & 0x7FFF)];
   u32 px_attr = px_comb | palette | 0x100;  // Combine flags + high palette bit
+  //u32 vcount = read_ioreg(REG_VCOUNT);
   
   if (is8bpp) {
     for (u32 j = 0; j < 2; j++) {
@@ -1061,14 +1072,18 @@ static inline void render_obj_tile_Nbpp(u32 px_comb,
               *dest_ptr = dest_ptr[240];
           }
         }
-      } else 
+      } else
         {
         // As this half-row is blank, check the Object Buffer for pixels
+        // Only check obj_buf if hijacking is enabled and this object is marked as hijacking
+        u32 vcount = read_ioreg(REG_VCOUNT);
+        bool is_hijacking = oam_hijacking_enabled && !rendering_obj_buffer && obj_hijack_flags[vcount][objnum];
+        
         for (u32 i = 0; i < 4; i++, dest_ptr++, sl_start++) {
           //u8 curr_pos = (u16*)dest_ptr - get_screen_pixels();
-          if(obj_buf[sl_start]) {
+          if(is_hijacking && sl_start < 240 && obj_buf[sl_start]) {
             if (rdtype == FULLCOLOR)
-              *dest_ptr = pal[(u8) obj_buf[sl_start]];
+              *dest_ptr = palette_ram_converted[obj_buf[sl_start] & 0x1FF];
             else if (rdtype == INDXCOLOR)
               *dest_ptr = obj_buf[sl_start];
             else if (rdtype == STCKCOLOR) {
@@ -1104,14 +1119,18 @@ static inline void render_obj_tile_Nbpp(u32 px_comb,
             *dest_ptr = dest_ptr[240];
         }
       }
-    } else 
+    } else
         {
         // As this full-row is blank, check the Object Buffer for pixels
+        // Only check obj_buf if hijacking is enabled and this object is marked as hijacking
+        u32 vcount = read_ioreg(REG_VCOUNT);
+        bool is_hijacking = oam_hijacking_enabled && !rendering_obj_buffer && obj_hijack_flags[vcount][objnum];
+        
         for (u32 i = 0; i < 8; i++, dest_ptr++, sl_start++) {
           //u8 curr_pos = (u16*)dest_ptr - get_screen_pixels();
-          if(obj_buf[sl_start]) {
+          if(is_hijacking && sl_start < 240 && obj_buf[sl_start]) {
             if (rdtype == FULLCOLOR)
-              *dest_ptr = subpal[(u8) obj_buf[sl_start]];
+              *dest_ptr = palette_ram_converted[obj_buf[sl_start] & 0x1FF];
             else if (rdtype == INDXCOLOR)
               *dest_ptr = obj_buf[sl_start];
             else if (rdtype == STCKCOLOR) {
@@ -1133,7 +1152,7 @@ static inline void render_obj_tile_Nbpp(u32 px_comb,
 template <typename stype, rendtype rdtype, bool is8bpp, bool hflip>
 static void render_object(
   s32 delta_x, u32 cnt, stype *dst_ptr, u32 tile_offset, u32 px_comb,
-  u16 palette, const u16* palptr
+  u16 palette, const u16* palptr, u8 objnum
 ) {
   // Tile size in bytes for each mode
   const u32 tile_bsize = is8bpp ? tile_size_8bpp : tile_size_4bpp;
@@ -1174,7 +1193,7 @@ static void render_object(
   while (num_tiles--) {
     // Render full tiles
     render_obj_tile_Nbpp<stype, rdtype, is8bpp, hflip>(
-      px_comb, dst_ptr, tile_offset, palette, palptr, scanline_start);
+      px_comb, dst_ptr, tile_offset, palette, palptr, scanline_start, objnum);
     tile_offset += tile_size_off;
     dst_ptr += 8;
     scanline_start +=8;
@@ -1452,10 +1471,120 @@ inline static void render_sprite(
     } else {
       if (hflip)
         render_object<stype, rdtype, is8bpp, true>(
-          obj_x_offset, max_draw, &scanline[start], tile_offset, pxcomb, pal, palptr);
+          obj_x_offset, max_draw, &scanline[start], tile_offset, pxcomb, pal, palptr, obji->objnum);
       else
         render_object<stype, rdtype, is8bpp, false>(
-          obj_x_offset, max_draw, &scanline[start], tile_offset, pxcomb, pal, palptr);
+          obj_x_offset, max_draw, &scanline[start], tile_offset, pxcomb, pal, palptr, obji->objnum);
+    }
+  }
+}
+
+// Renders objects in OAM priority order (start_obj->0) for hijack scenarios.
+// This fills the obj_buf with all relevant OBJs for the scanline in OAM order only.
+template <typename stype, rendtype rdtype>
+void render_scanline_objs_oam_order(
+  u32 start, u32 end, void *raw_ptr, const u16* palptr, s32 start_obj
+) {
+  stype *scanline = (stype*)raw_ptr;
+  s32 vcount = read_ioreg(REG_VCOUNT);
+  t_oam *oam_base = (t_oam*)oam_ram;
+
+  // Iterate through OBJs in OAM order (start_obj -> 0)
+  for (s32 obj_num = start_obj; obj_num >= 0; obj_num--) {
+    const t_oam *oamentry = &oam_base[obj_num];
+    
+    u16 obj_attr0 = eswap16(oamentry->attr0);
+    u16 obj_attr1 = eswap16(oamentry->attr1);
+    u16 obj_attr2 = eswap16(oamentry->attr2);
+    
+    // Skip disabled objects (bit 9 disables regular sprites)
+    if ((obj_attr0 & 0x0300) == 0x0200)
+      continue;
+    
+    u16 obj_shape = obj_attr0 >> 14;
+    u32 obj_mode = (obj_attr0 >> 10) & 0x03;
+    
+    // Skip prohibited shape and mode
+    if ((obj_shape == 0x3) || (obj_mode == OBJ_MOD_INVALID))
+      continue;
+    
+    // Skip bitmap mode restrictions (modes 3-5)
+    u16 dispcnt = read_ioreg(REG_DISPCNT);
+    u32 video_mode = dispcnt & 0x07;
+    if ((video_mode >= 3) && (!(obj_attr2 & 0x200)))
+      continue;
+    
+    // Calculate object dimensions
+    u16 obj_size = (obj_attr1 >> 14);
+    s32 obj_height = obj_dim_table[obj_shape][obj_size][1];
+    s32 obj_width = obj_dim_table[obj_shape][obj_size][0];
+    s32 obj_y = obj_attr0 & 0xFF;
+    s32 obj_x = (s32)(obj_attr1 << 23) >> 23;
+    
+    if (obj_y > 160)
+      obj_y -= 256;
+    
+    // Double size for affine sprites with double bit set
+    if (obj_attr0 & 0x200) {
+      obj_height *= 2;
+      obj_width *= 2;
+    }
+    
+    // Check if object is visible on current scanline
+    if (!((obj_y + obj_height) > 0 && obj_y < 160))
+      continue;
+    if (vcount < obj_y || vcount >= obj_y + obj_height)
+      continue;
+    
+    // Check if object is visible horizontally (match order_obj logic)
+    if (!((obj_x + obj_width) > 0 && obj_x < 240))
+      continue;
+    
+    bool is_affine = obj_attr0 & 0x100;
+    bool is_trans = ((obj_attr0 >> 10) & 0x3) == OBJ_MOD_SEMITRAN;
+    
+    t_sprite obji = {
+      .obj_x = obj_x,
+      .obj_y = obj_y,
+      .obj_w = obj_dim_table[obj_shape][obj_size][0],
+      .obj_h = obj_dim_table[obj_shape][obj_size][1],
+      .attr1 = obj_attr1,
+      .attr2 = obj_attr2,
+      .is_double = (obj_attr0 & 0x200) != 0,
+      .objnum = (u8)obj_num
+    };
+    
+    s32 obj_maxw = (is_affine && obji.is_double) ? obji.obj_w * 2 : obji.obj_w;
+    
+    // Skip if object is outside the render window
+    if (obji.obj_x >= (signed)end || obji.obj_x + obj_maxw <= (signed)start)
+      continue;
+    
+    // Calculate combine masks for blending
+    u32 pxcomb = color_flags(4);
+    if (is_trans && rdtype != FULLCOLOR)
+      pxcomb |= 0x800; // Force blending for ST-objects
+    
+    bool emosaic = (obj_attr0 & 0x1000) != 0;
+    bool is_8bpp = (obj_attr0 & 0x2000) != 0;
+    
+    // Some games enable mosaic but set it to size 0 (1), so ignore.
+    const u32 mosreg = read_ioreg(REG_MOSAIC) & 0xFF00;
+    
+    if (emosaic && mosreg) {
+      if (is_8bpp)
+        render_sprite<stype, rdtype, true, true>(
+          &obji, is_affine, start, end, scanline, pxcomb, palptr);
+      else
+        render_sprite<stype, rdtype, false, true>(
+          &obji, is_affine, start, end, scanline, pxcomb, palptr);
+    } else {
+      if (is_8bpp)
+        render_sprite<stype, rdtype, true, false>(
+          &obji, is_affine, start, end, scanline, pxcomb, palptr);
+      else
+        render_sprite<stype, rdtype, false, false>(
+          &obji, is_affine, start, end, scanline, pxcomb, palptr);
     }
   }
 }
@@ -1473,13 +1602,13 @@ void render_scanline_objs(
   u8 *objlist = obj_priority_list[priority][vcount];
 
   // Clear the object buffer for Priority 0
-  if(priority == 0)
-    memset(obj_buf, 0, sizeof(obj_buf));
+  //if(priority == 0)
+  //  memset(obj_buf, 0, sizeof(obj_buf));
 
   // Render all the visible objects for this priority (back to front)
   for (objn = objcnt-1; objn >= 0; objn--) {
     // Objects in the list are pre-filtered and sorted in the appropriate order
-    u32 objoff = objlist[objn];
+    u8 objoff = objlist[objn];
     const t_oam *oamentry = &((t_oam*)oam_ram)[objoff];
 
     u16 obj_attr0 = eswap16(oamentry->attr0);
@@ -1497,6 +1626,7 @@ void render_scanline_objs(
       .attr1 = obj_attr1,
       .attr2 = eswap16(oamentry->attr2),
       .is_double = (obj_attr0 & 0x200) != 0,
+      .objnum = objoff
     };
 
     s32 obj_maxw = (is_affine && obji.is_double) ? obji.obj_w * 2 : obji.obj_w;
@@ -1551,6 +1681,17 @@ void render_scanline_objs(
         render_sprite<stype, rdtype, false, false>(
           &obji, is_affine, start, end, scanline, pxcomb, palptr);
     }
+    
+    // Clear the hijack buffer for this row now that we've rendered the first hijack OBJ encountered
+    // This should fix issues with transparency on higher priority OBJs in the order
+    //if((oam_line_hijack[vcount] == objoff) && objoff > 0) {
+        //printf("OBJ %d has caused the OBJ Buffer to clear, clearing %d bytes \n", objoff, sizeof(obj_buf));
+        // oam_line_hijack[vcount] = 0;
+        // Clear the object buffer
+        // memset(obj_buf, 0, sizeof(obj_buf));
+
+    //}
+
   }
 }
 
@@ -1565,7 +1706,7 @@ static void order_obj(u32 video_mode)
   u32 row;
   t_oam *oam_base = (t_oam*)oam_ram;
   u16 rend_cycles[160];
-  u8 obj_priority = 0;
+  u8 highest_priority = 0;
 
   // When we call order_obj, it means OAM has changed
   // Reset the hijack counter and mark the obj_buffer as not yet filled
@@ -1581,6 +1722,8 @@ static void order_obj(u32 video_mode)
   memset(rend_cycles, 0, sizeof(rend_cycles));
   // Let's also clear the hijack row flags
   memset(oam_line_hijack, 0, sizeof(oam_line_hijack));
+  // Clear the hijack flags for all objects on all scanlines
+  memset(obj_hijack_flags, 0, sizeof(obj_hijack_flags));
   
 
   for(obj_num = 0; obj_num < 128; obj_num++)
@@ -1631,15 +1774,25 @@ static void order_obj(u32 video_mode)
       {
         // Let's check for OAM hijack here.  If detected for this object we'll turn on hijacking for all
         // active objects from now on.
-        // This code needs further optimisation because ideally we only want to mark rows as hijacked
-        // for specific objects, but as it stands it will mark everything as hijacked from the first
-        // encounter onwards.
-        if(((obj_attr2 >> 10) & 0x03) < obj_priority)
+        // We only set the row as hijacked if the OBJ is visible on-screen and is hijacking
+        // It will mark the row as hijacked and set the value to the OBJ number.
+        u32 obj_priority = (obj_attr2 >> 10) & 0x03;
+        
+        // Check if this specific object is hijacking the priority order
+        // Don't mark wrap-around objects as hijacking to avoid out-of-bounds issues  
+        if(oam_hijacking_enabled && (obj_priority < highest_priority) && obj_num != 4)
           {
-            oam_hijack = 1;
+            // This object is hijacking - set oam_hijack to this object's number
+            oam_hijack = obj_num;
             //printf("OBJ %d is hijacking, X %d, Y %d \n", obj_num, obj_x, obj_y);
           }
-        obj_priority = (obj_attr2 >> 10) & 0x03;
+        else
+          {
+            // This object is not hijacking - reset oam_hijack and update the priority baseline
+            oam_hijack = 0;
+            highest_priority = obj_priority;
+          }
+          
         bool is_affine = obj_attr0 & 0x100;
         // Clip Y coord and height to the 0..159 interval
         u32 starty = MAX(obj_y, 0);
@@ -1657,8 +1810,12 @@ static void order_obj(u32 video_mode)
               obj_priority_list[obj_priority][row][cur_cnt] = obj_num;
               obj_priority_count[obj_priority][row] = cur_cnt + 1;
               rend_cycles[row] += cyccnt;
-              // Assignment probably quicker than comparison, so let's just set the line hijack every time
-              oam_line_hijack[row] = oam_hijack;
+              // Set the hijack row if oam_hijack is active
+              // Mark this object as hijacking if oam_hijack is active
+              if(oam_hijacking_enabled && oam_hijack > 0) {
+                oam_line_hijack[row] = oam_hijack;
+                obj_hijack_flags[row][obj_num] = 1;
+              }
               //if(oam_hijack)
               //  printf("OAM Hijack Row: %d, Object: %d \n", row, obj_num);
               // Mark the row as having semi-transparent objects
@@ -1678,8 +1835,12 @@ static void order_obj(u32 video_mode)
               obj_priority_list[obj_priority][row][cur_cnt] = obj_num;
               obj_priority_count[obj_priority][row] = cur_cnt + 1;
               rend_cycles[row] += cyccnt;
-              // Assignment probably quicker than comparison->assignment, so let's just set the line hijack every time
-              oam_line_hijack[row] = oam_hijack;
+              // Set the hijack row if oam_hijack is active
+              // Mark this object as hijacking if oam_hijack is active
+              if(oam_hijacking_enabled && oam_hijack > 0) {
+                oam_line_hijack[row] = oam_hijack;
+                obj_hijack_flags[row][obj_num] = 1;
+              }
               //if(oam_hijack)
               //  printf("OAM Hijack Row: %d, Object: %d \n", row, obj_num);
             }
@@ -1924,7 +2085,7 @@ void tile_render_layers(u32 start, u32 end, dsttype *dst_ptr, u32 enabled_layers
   bool objlayer_is_1st_tgt = ((read_ioreg(REG_BLDCNT) >> 4) & 1) != 0;
   bool has_trans_obj = obj_alpha_count[read_ioreg(REG_VCOUNT)];
 
-  bool row_obj_hijack = oam_line_hijack[read_ioreg(REG_VCOUNT)];
+  u8 row_obj_hijack = oam_line_hijack[read_ioreg(REG_VCOUNT)];
   u16 *obj_buf_ptr;
   obj_buf_ptr = obj_buf;
 
@@ -1933,20 +2094,20 @@ void tile_render_layers(u32 start, u32 end, dsttype *dst_ptr, u32 enabled_layers
 
   // If this line has OAM hijack we need to fill the buffer with OBJ layers
   // first so that the buffer is available to overlay pixels onto transparent OBJ areas
-  if (row_obj_hijack) {
-     // Fill it with Object Layers only, back to front
-     for (lnum = 0; lnum < layer_count; lnum++) {
-       u32 layer = layer_order[lnum];
-       bool is_obj = layer & 0x4;
-       if (is_obj && obj_enabled) {
-         //printf("Start: %d, End: %d, Row: %d \n", start, end, read_ioreg(REG_VCOUNT));
-         // Render to u16/INDXCOLOR to allow us to cover all render types when substituting pixels 
-         render_scanline_objs<u16, INDXCOLOR>(layer & 0x3, start, end, obj_buf_ptr, &palette_ram_converted[0x100]);
-         //for(u8 c = 0; c < 240; c++) {
-         //   if(obj_buf[c])
-         //       printf("OBJ Mode: %d, OBJ Buf Pos: %d, OBJ Buf: %d, Start: %d, End: %d, Row: %d \n", objmode, c, obj_buf[c], start, end, read_ioreg(REG_VCOUNT));
-         //}
-       }
+  if (oam_hijacking_enabled && row_obj_hijack) {
+     // Fill it with Object Layers in OAM priority order (row_obj_hijack->0), ignoring BG priority
+     if (obj_enabled) {
+       //printf("Start: %d, End: %d, Row: %d \n", start, end, read_ioreg(REG_VCOUNT));
+       // Disable hijacking behavior when creating the obj buffer
+       rendering_obj_buffer = true;
+       // Render to u16/INDXCOLOR to allow us to cover all render types when substituting pixels
+       render_scanline_objs_oam_order<u16, INDXCOLOR>(start, end, obj_buf_ptr, &palette_ram_converted[0x100], row_obj_hijack);
+       // Re-enable hijacking behavior for normal rendering
+       rendering_obj_buffer = false;
+       //for(u8 c = 0; c < 240; c++) {
+       //   if(obj_buf[c])
+       //       printf("OBJ Mode: %d, OBJ Buf Pos: %d, OBJ Buf: %d, Start: %d, End: %d, Row: %d \n", objmode, c, obj_buf[c], start, end, read_ioreg(REG_VCOUNT));
+       //}
      }
   }
 
@@ -2139,7 +2300,7 @@ static void bitmap_render_layers(
   u32 current_layer;
   u32 layer_order_pos;  
 
-  bool row_obj_hijack = oam_line_hijack[read_ioreg(REG_VCOUNT)];
+  u8 row_obj_hijack = oam_line_hijack[read_ioreg(REG_VCOUNT)];
   u16 *obj_buf_ptr;
   obj_buf_ptr = obj_buf;
 
@@ -2148,21 +2309,20 @@ static void bitmap_render_layers(
 
   // If this line has OAM hijack we need to fill the buffer with OBJ layers 
   // first so that the buffer is available to overlay pixels onto transparent OBJ areas
-  if (row_obj_hijack) {
-     // Fill it with Object Layers only, back to front
-     for (layer_order_pos = 0; layer_order_pos < layer_count; layer_order_pos++) {
-       current_layer = layer_order[layer_order_pos];
-       bool is_obj = current_layer & 0x4;
-       bool obj_enabled = enable_flags & 0x10;
-       if (is_obj && obj_enabled) {
-         //printf("Start: %d, End: %d, Row: %d \n", start, end, REG_VCOUNT);
-         // Render to u16/INDXCOLOR to allow us to cover all render types when substituting pixels 
-         render_scanline_objs<dsttype, FULLCOLOR>(current_layer & 0x3, start, end, obj_buf_ptr, &palette_ram_converted[0x100]);
-       }
+  if (oam_hijacking_enabled && row_obj_hijack) {
+     // Fill it with Object Layers in OAM priority order (row_obj_hijack->0), ignoring BG priority
+     bool obj_enabled = enable_flags & 0x10;
+     if (obj_enabled) {
+       //printf("Start: %d, End: %d, Row: %d \n", start, end, REG_VCOUNT);
+       // Disable hijacking behavior when creating the obj buffer
+       rendering_obj_buffer = true;
+       // Render to dsttype/FULLCOLOR to allow us to cover all render types when substituting pixels 
+       render_scanline_objs_oam_order<dsttype, FULLCOLOR>(start, end, obj_buf_ptr, &palette_ram_converted[0x100], row_obj_hijack);
+       // Re-enable hijacking behavior for normal rendering
+       rendering_obj_buffer = false;
      }
   }  
-
-
+  
   // Fill in the renderers for a layer based on the mode type,
   static const bitmap_layer_render_struct renderers[3][2] =
   {
@@ -2178,7 +2338,7 @@ static void bitmap_render_layers(
   unsigned modeidx = (dispcnt & 0x07) - 3;
   const bitmap_layer_render_struct *mode_rend = &renderers[modeidx][mmode];
   const bitmap_layer_render_struct *idxm_rend = &idx32_bmrend[modeidx][mmode];
-
+  
   fill_line_background<bgmode, dsttype>(start, end, scanline);
 
   for(layer_order_pos = 0; layer_order_pos < layer_count; layer_order_pos++)
@@ -2330,12 +2490,12 @@ static void render_window_n_pass(u16 *scanline, u32 start, u32 end)
     // Enable bits for stuff inside the window (and outside)
     u32 winin = read_ioreg(REG_WININ);
     u32 wndn_enable = (winin >> (8 * winnum)) & 0x3F;
-
     // If the window is defined upside down, the areas are inverted.
     if (goodwin) {
       // Render [start, win_l) range (which is outside the window)
       if (win_l != start)
         outfn(scanline, start, win_l);
+
       // Render the actual window0 pixels
       render_scanline_conditional(win_l, win_r, scanline, wndn_enable);
       // Render the [win_l, end] range (outside)
@@ -2412,6 +2572,7 @@ void update_scanline(void)
 {
   u32 pitch = get_screen_pitch();
   u16 dispcnt = read_ioreg(REG_DISPCNT);
+  u16 grnswp = read_ioreg(REG_GRNSWP);
   u32 vcount = read_ioreg(REG_VCOUNT);
   u16 *screen_offset = get_screen_pixels() + (vcount * pitch);
   u32 video_mode = dispcnt & 0x07;
@@ -2435,6 +2596,24 @@ void update_scanline(void)
   else
     render_scanline_window(screen_offset);
 
+  // Check for Undocumented Green Swap screen mode
+  if (grnswp) {
+    u16 swapbuffer = 0;
+    // Apply Green Swap to scanline in place for speed
+    for (u8 x = 0; x < pitch; x += 4) {
+        swapbuffer = screen_offset[x];
+        screen_offset[x] = screen_offset[x] & (M_COLOR_RED | M_COLOR_BLUE);
+        screen_offset[x] |= screen_offset[x + 1] & M_COLOR_GREEN;
+        screen_offset[x + 1] = screen_offset[x + 1] & (M_COLOR_RED | M_COLOR_BLUE);
+        screen_offset[x + 1] |= swapbuffer & M_COLOR_GREEN;
+        swapbuffer = screen_offset[x + 2];
+        screen_offset[x + 2] = screen_offset[x + 2] & (M_COLOR_RED | M_COLOR_BLUE);
+        screen_offset[x + 2] |= screen_offset[x + 3] & M_COLOR_GREEN;
+        screen_offset[x + 3] = screen_offset[x + 3] & (M_COLOR_RED | M_COLOR_BLUE);
+        screen_offset[x + 3] |= swapbuffer & M_COLOR_GREEN;
+    }
+  }
+  
   // Mode 0 does not use any affine params at all.
   if (video_mode) {
     // Account for vertical mosaic effect, by correcting affine references.
@@ -2461,3 +2640,4 @@ void update_scanline(void)
     }
   }
 }
+
