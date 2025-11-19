@@ -798,18 +798,22 @@ unsigned sound_write_savestate(u8 *dst)
 u32 sound_read_samples(s16 *out, u32 frames)
 {
    u32 i;
-   u32 samples_to_read   = frames << 1;
+   u32 samples_to_read = frames << 1;
+   
    /* Get total number of samples in the buffer */
    u32 samples_available = (gbc_sound_buffer_index - sound_buffer_base) & BUFFER_SIZE_MASK;
-   /* The last 512 samples are 'in use', and cannot
-    * be read out yet */
-   samples_available     = (samples_available > 512) ? (samples_available - 512) : 0;
+   u32 safety_margin = 256;
+   
+   samples_available = (samples_available > safety_margin) ? 
+                       (samples_available - safety_margin) : 0;
+   
    /* Available sample count must be an even number */
-   samples_available     = (samples_available >> 1) << 1;
+   samples_available = (samples_available >> 1) << 1;
 
    if (samples_to_read > samples_available)
       samples_to_read = samples_available;
 
+   /* Copiar samples sin procesamiento complejo - preserva todos los canales */
    for(i = 0; i < samples_to_read; i++)
    {
       u32 source_index   = (sound_buffer_base + i) & BUFFER_SIZE_MASK;
@@ -817,6 +821,7 @@ u32 sound_read_samples(s16 *out, u32 frames)
 
       sound_buffer[source_index] = 0;
 
+      /* Simple clipping conservador - solo para extremos */
       if(current_sample > 2047)
          current_sample = 2047;
       if(current_sample < -2048)
