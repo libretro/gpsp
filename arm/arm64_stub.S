@@ -585,7 +585,6 @@ ext_store_oam_ram_u##store_type##_safe:                                      ;\
 ext_store_ioreg_u##store_type:                                               ;\
   str w2, [reg_base, #REG_PC]             /* write out PC                  */;\
   str lr, [reg_base, #REG_SAVE]           /* Preserve LR                   */;\
-  and w0, w0, #(0x3ff & ~stmask)                                             ;\
   store_registers()                                                          ;\
   bl write_io_register##store_type                                           ;\
   cbnz w0, write_epilogue                 /* handle additional write stuff */;\
@@ -684,7 +683,6 @@ ext_store_ewram_u32_safe:
   ret                                     // Return
 ext_store_ioreg_u32_safe:
   str lr, [reg_base, #REG_SAVE]
-  and w0, w0, #(0x3fc)
   store_registers()
   bl write_io_register32
   ldr lr, [reg_base, #REG_SAVE]

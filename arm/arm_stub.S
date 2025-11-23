@@ -500,7 +500,6 @@ ext_io_store_u##store_type:                                                  ;\
   ldr r2, [lr]                            /* load PC                       */;\
   str r2, [reg_base, #REG_PC]             /* write out PC                  */;\
                                                                              ;\
-  mask_addr_##store_type(10)              /* Mask to IO memory (+align)    */;\
   call_c_function(write_io_register##store_type)                             ;\
                                                                              ;\
   cmp r0, #0                                                                 ;\

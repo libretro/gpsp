@@ -2536,7 +2536,6 @@ static void emit_saveaccess_stub(u8 **tr_ptr) {
   const u32 iowrtbl[] = {
     (u32)&write_io_register8, (u32)&write_io_register16,
     (u32)&write_io_register32, (u32)&write_io_register32 };
-  const u32 amsk[] = {0x3FF, 0x3FE, 0x3FC, 0x3FC};
   for (strop = 0; strop <= 3; strop++) {
     tmemst[strop][4] = (u32)translation_ptr;
     mips_emit_srl(reg_temp, reg_a0, 24);
@@ -2545,7 +2544,6 @@ static void emit_saveaccess_stub(u8 **tr_ptr) {
 
     mips_emit_sw(mips_reg_ra, reg_base, ReOff_SaveR3); // Store the return addr
     emit_save_regs(strop == 3);
-    mips_emit_andi(reg_a0, reg_a0, amsk[strop]);
     genccall(iowrtbl[strop]);
 
     if (strop < 3) {
