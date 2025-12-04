@@ -90,6 +90,11 @@ typedef struct
 #define RENDER_COL32    2
 #define RENDER_ALPHA    3
 
+// GRNSWP colors
+#define M_COLOR_RED   0xF800
+#define M_COLOR_GREEN 0x07E0
+#define M_COLOR_BLUE  0x001F
+#define M_COLOR_ALPHA 0x0000
 
 // Byte lengths of complete tiles and tile rows in 4bpp and 8bpp.
 
@@ -2286,6 +2291,7 @@ void update_scanline(void)
 {
   u32 pitch = get_screen_pitch();
   u16 dispcnt = read_ioreg(REG_DISPCNT);
+  u16 grnswp = read_ioreg(REG_GRNSWP);
   u32 vcount = read_ioreg(REG_VCOUNT);
   u16 *screen_offset = get_screen_pixels() + (vcount * pitch);
   u32 video_mode = dispcnt & 0x07;
@@ -2309,6 +2315,24 @@ void update_scanline(void)
   else
     render_scanline_window(screen_offset);
 
+  // Check for Undocumented Green Swap screen mode
+  if (grnswp) {
+    u16 swapbuffer = 0;
+    // Apply Green Swap to scanline in place for speed
+    for (u8 x = 0; x < pitch; x += 4) {
+        swapbuffer = screen_offset[x];
+        screen_offset[x] = screen_offset[x] & (M_COLOR_RED | M_COLOR_BLUE);
+        screen_offset[x] |= screen_offset[x + 1] & M_COLOR_GREEN;
+        screen_offset[x + 1] = screen_offset[x + 1] & (M_COLOR_RED | M_COLOR_BLUE);
+        screen_offset[x + 1] |= swapbuffer & M_COLOR_GREEN;
+        swapbuffer = screen_offset[x + 2];
+        screen_offset[x + 2] = screen_offset[x + 2] & (M_COLOR_RED | M_COLOR_BLUE);
+        screen_offset[x + 2] |= screen_offset[x + 3] & M_COLOR_GREEN;
+        screen_offset[x + 3] = screen_offset[x + 3] & (M_COLOR_RED | M_COLOR_BLUE);
+        screen_offset[x + 3] |= swapbuffer & M_COLOR_GREEN;
+    }
+  }
+  
   // Mode 0 does not use any affine params at all.
   if (video_mode) {
     // Account for vertical mosaic effect, by correcting affine references.
