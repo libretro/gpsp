@@ -58,6 +58,10 @@ else ifneq ($(findstring MINGW,$(shell uname -a)),)
 	system_platform = win
 endif
 
+ifneq (,$(findstring webos,$(CROSS_COMPILE)))
+	CPU_ARCH := arm
+endif
+
 TARGET_NAME	:= gpsp
 GIT_VERSION := "$(shell git rev-parse --short HEAD || echo unknown)"
 ifneq ($(GIT_VERSION),"unknown")
