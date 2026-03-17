@@ -2076,6 +2076,7 @@ arm_loop:
                 {
                    /* BX rn */
                    arm_decode_branchx(opcode);
+                   arm_pc_offset(8);
                    u32 src = reg[rn];
                    if(src & 0x01)
                    {

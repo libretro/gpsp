@@ -2162,7 +2162,7 @@ static void function_cc execute_swi(u32 pc)
 
 #define arm_bx()                                                              \
   arm_decode_branchx(opcode);                                                 \
-  generate_load_reg(a0, rn);                                                  \
+  generate_load_reg_pc(a0, rn, 8);                                            \
   generate_indirect_branch_dual();                                            \
 
 #define arm_swi()                                                             \

@@ -808,7 +808,7 @@ static inline s32 signext28(u32 value)
 
 cpu_alert_type function_cc write_io_register16(u32 address, u32 value)
 {
-  uint16_t ioreg = (address & 0x3FE) >> 1;
+  uint32_t ioreg = ((address & 0xffffff) >> 1);
   value &= 0xffff;
   switch(ioreg)
   {
@@ -963,7 +963,8 @@ cpu_alert_type function_cc write_io_register16(u32 address, u32 value)
 
     // Registers without side effects
     default:
-      write_ioreg(ioreg, value);
+      if (ioreg < 0x200)
+        write_ioreg(ioreg, value);
       break;
   }
 
@@ -972,6 +973,7 @@ cpu_alert_type function_cc write_io_register16(u32 address, u32 value)
 
 cpu_alert_type function_cc write_io_register8(u32 address, u32 value)
 {
+  address &= 0xffffff;
   if (address == 0x301) {
     if (value & 1)
       reg[CPU_HALT_STATE] = CPU_STOP;
@@ -981,15 +983,20 @@ cpu_alert_type function_cc write_io_register8(u32 address, u32 value)
   }
 
   // Partial 16 bit write, treat like a regular merge-write
-  if (address & 1)
-    value = (value << 8) | (read_ioreg(address >> 1) & 0x00ff);
-  else
-    value = (value & 0xff) | (read_ioreg(address >> 1) & 0xff00);
-  return write_io_register16(address & 0x3FE, value);
+  if (address < 0x400) {
+    if (address & 1)
+      value = (value << 8) | (read_ioreg(address >> 1) & 0x00ff);
+    else
+      value = (value & 0xff) | (read_ioreg(address >> 1) & 0xff00);
+    return write_io_register16(address & ~1U, value);
+  }
+
+  return CPU_ALERT_NONE;
 }
 
 cpu_alert_type function_cc write_io_register32(u32 address, u32 value)
 {
+  address &= 0xfffffc;
   // Handle sound FIFO data write
   if (address == 0xA0) {
     sound_timer_queue32(0, value);
@@ -1423,7 +1430,7 @@ void function_cc write_gpio(u32 address, u32 value) {
                                                                               \
     case 0x04:                                                                \
       /* I/O registers */                                                     \
-      return write_io_register##type(address & 0x3FF, value);                 \
+      return write_io_register##type(address, value);                         \
                                                                               \
     case 0x05:                                                                \
       /* palette RAM */                                                       \
@@ -1763,7 +1770,7 @@ const dma_region_type dma_region_map[17] =
 }
 
 #define dma_write_io(type, tfsize)                                            \
-  alerts |= write_io_register##tfsize(type##_ptr & 0x3FF, read_value)         \
+  alerts |= write_io_register##tfsize(type##_ptr, read_value)                 \
 
 #define dma_write_oam_ram(type, tfsize)                                       \
   address##tfsize(oam_ram, type##_ptr & 0x3FF) = eswap##tfsize(read_value)    \

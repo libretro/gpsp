@@ -344,7 +344,6 @@ ext_##fname##_oam##wsize:                                                    ;\
   ret                                                                        ;\
                                                                              ;\
 ext_##fname##_io##wsize:                                                     ;\
-  and $(0x3FF & addrm), %eax                               /* Addr wrap */   ;\
   SETUP_ARGS                                                                 ;\
   CALL_FUNC(write_io_register##wsize)                    /* Call C code */   ;\
   cmp $0, %eax                                /* Check for side-effects */   ;\

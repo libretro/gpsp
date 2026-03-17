@@ -1920,7 +1920,7 @@ static void trace_instruction(u32 pc, u32 mode)
 
 #define arm_bx()                                                              \
   arm_decode_branchx(opcode);                                                 \
-  arm_generate_load_reg(reg_a0, rn);                                          \
+  arm_generate_load_reg_pc(reg_a0, rn, 8);                                    \
   generate_indirect_branch_dual();                                            \
 
 #define arm_swi()                                                             \
