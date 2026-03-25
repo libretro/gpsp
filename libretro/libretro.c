@@ -1137,6 +1137,30 @@ bool retro_load_game(const struct retro_game_info* info)
       return false;
    }
 
+   if (selected_bios != builtin_bios && gamepak_header_nonstandard)
+   {
+      show_warning_message("Non-standard ROM header detected, using built-in BIOS", 2500);
+      memcpy(bios_rom, open_gba_bios_rom, sizeof(bios_rom));
+   }
+
+   if (selected_bios != builtin_bios &&
+       backup_type == BACKUP_FLASH &&
+       flash_bank_cnt == FLASH_SIZE_128KB &&
+       serial_mode == SERIAL_MODE_SERIAL_POKE)
+   {
+      show_warning_message("Pokemon M1 profile detected, using built-in BIOS", 2500);
+      memcpy(bios_rom, open_gba_bios_rom, sizeof(bios_rom));
+   }
+
+#ifdef HAVE_DYNAREC
+   if (gamepak_mini_materialized && dynarec_enable)
+   {
+      dynarec_enable = 0;
+      flush_dynarec_caches();
+      show_warning_message("Mini ROM detected, dynamic recompiler disabled", 2500);
+   }
+#endif
+
    struct retro_rumble_interface rumbleif;
    if (environ_cb(RETRO_ENVIRONMENT_GET_RUMBLE_INTERFACE, &rumbleif))
       rumble_cb = rumbleif.set_rumble_state;
