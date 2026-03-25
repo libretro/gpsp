@@ -40,11 +40,33 @@ static const u32 gbp_seq[16] = {
 
 static u32 gbp_seq_n = 0;
 static bool gbp_rumble = false;
+static bool gbp_allow_rumble = false;
+
+void gbp_reset(void) {
+  write_rumble(gbp_rumble, false);
+  gbp_rumble = false;
+  gbp_seq_n = 0;
+  gbp_allow_rumble = false;
+}
 
 // GB Player sequencing
 u32 gbp_transfer(u32 value) {
   u32 ret = gbp_seq[gbp_seq_n++];
+
+  if (!gbp_allow_rumble &&
+      reg[REG_PC] >= 0x08000000 && reg[REG_PC] < 0x0E000000)
+    gbp_allow_rumble = true;
+
   if (gbp_seq_n == 16) {
+    if (!gbp_allow_rumble) {
+      if (gbp_rumble) {
+        write_rumble(gbp_rumble, false);
+        gbp_rumble = false;
+      }
+      gbp_seq_n = 0;
+      return ret;
+    }
+
     bool rumble_active = (value & 2);
     write_rumble(gbp_rumble, rumble_active);
     gbp_rumble = rumble_active;
@@ -52,4 +74,3 @@ u32 gbp_transfer(u32 value) {
   }
   return ret;
 }
-

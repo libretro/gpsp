@@ -2196,8 +2196,14 @@ static u32 evict_gamepak_page(void)
 
 u8 *load_gamepak_page(u32 physical_index)
 {
-  if(physical_index >= (gamepak_size >> 15))
+  u32 rom_blocks = gamepak_size >> 15;
+  if (rom_blocks == 0)
     return &gamepak_buffers[0][0];
+
+  // Mirror accesses that land outside the physical ROM size.
+  // Classic NES/Famicom Mini titles rely on this behavior extensively.
+  if (physical_index >= rom_blocks)
+    physical_index %= rom_blocks;
 
   u32 entry = evict_gamepak_page();
   u32 block_idx = entry / 32;
@@ -2219,7 +2225,7 @@ u8 *load_gamepak_page(u32 physical_index)
   }
 
   // Map it to the read handlers now
-  map_rom_entry(read, physical_index, swap_location, gamepak_size >> 15);
+  map_rom_entry(read, physical_index, swap_location, rom_blocks);
 
   // When mapping page 0, we might need to reflect the GPIO regs.
   if (physical_index == 0)

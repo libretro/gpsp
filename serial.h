@@ -57,5 +57,5 @@ void serialaw_net_receive(const void* buf, size_t len, uint16_t client_id);
 
 // GBP interface
 u32 gbp_transfer(u32 value);
-
+void gbp_reset(void);
 
