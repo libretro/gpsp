@@ -2733,7 +2733,7 @@ static bool rom_is_pokemon_family(const u8 *rom)
       memcmp(&rom[0xAC], "BPR", 3) == 0 ||  /* FireRed */
       memcmp(&rom[0xAC], "BPG", 3) == 0)    /* LeafGreen */
     return true;
-
+	
   return false;
 }
 
@@ -2833,8 +2833,27 @@ u32 load_gamepak(const struct retro_game_info* info, const char *name,
    gamepak_header_nonstandard =
       (gamepak_buffers[0][3] != 0xEA) || (gamepak_buffers[0][0xB2] != 0x96);
 
-   // Buffer 0 always has the first 1MB chunk of the ROM
-   memcpy(game_code,  &gamepak_buffers[0][0xAC],  4);
+   /* Buffer 0 always has the first 1MB chunk of the ROM.
+    * Read game code regardless of header validity: ROM hacks usually
+    * preserve the code at 0xAC even when other header bytes are wrong. */
+   memcpy(game_code, &gamepak_buffers[0][0xAC], 4);
+
+   /* Sanitise game code: if all bytes are non-alphanumeric
+    * (homebrews, some NSP-extracted ROMs), use "UNKN" so
+    * load_game_config_over gets a consistent string to compare. */
+   {
+      int ci;
+      bool code_valid = false;
+      for (ci = 0; ci < 4; ci++) {
+         unsigned char c = (unsigned char)game_code[ci];
+         if ((c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9')) {
+            code_valid = true;
+            break;
+         }
+      }
+      if (!code_valid)
+         memcpy(game_code, "UNKN", 4);
+   }
 
    idle_loop_target_pc = 0xFFFFFFFF;
    translation_gate_targets = 0;
@@ -2849,7 +2868,37 @@ u32 load_gamepak(const struct retro_game_info* info, const char *name,
 
    if (backup_type_reset == BACKUP_UNKN)
    {
-      detect_backup_subcircuit(gamepak_buffers[0], 1024 * 1024);
+      u32 scan_size = gamepak_size < (1024*1024) ? gamepak_size : (1024*1024);
+      detect_backup_subcircuit(gamepak_buffers[0], scan_size);
+    }
+
+   /* Second pass: scan the full ROM file if still undetected.
+    * ROM hacks (especially large Pokemon hacks) and NSP-extracted ROMs
+    * may place backup strings beyond the first 1MB buffer.
+    * rom_scan_signatures_file() reads the whole file in chunks. */
+   if (backup_type_reset == BACKUP_UNKN)
+   {
+      u32 file_sigs = rom_scan_signatures_file();
+      if (file_sigs & ROM_SIG_EEPROM)
+      {
+         backup_type_reset = BACKUP_EEPROM;
+      }
+      else if (file_sigs & ROM_SIG_FLASH1M)
+      {
+         backup_type_reset = BACKUP_FLASH;
+         flash_bank_cnt    = FLASH_SIZE_128KB;
+         flash_device_id   = FLASH_DEVICE_SANYO_128KB;
+      }
+      else if (file_sigs & ROM_SIG_FLASH5)
+      {
+         backup_type_reset = BACKUP_FLASH;
+         flash_bank_cnt    = FLASH_SIZE_64KB;
+         flash_device_id   = FLASH_DEVICE_MACRONIX_64KB;
+      }
+      else if (file_sigs & ROM_SIG_SRAM)
+      {
+         backup_type_reset = BACKUP_SRAM;
+      }
    }
 
    if (backup_type_reset == BACKUP_FLASH &&
