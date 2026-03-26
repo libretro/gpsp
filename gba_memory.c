@@ -272,6 +272,9 @@ static void trigger_timer(u32 timer_number, u32 value)
    write_ioreg(REG_TMXCNT(timer_number), value);
 }
 
+bool is_known_game = false;
+bool require_m1_hle_bios = false;
+
 /* Memory timings */
 const u8 ws012_nonseq[] = {4, 3, 2, 8};
 const u8 ws0_seq[] = {2, 1};
@@ -1590,13 +1593,15 @@ typedef struct
 static void load_game_config_over(const char *gamecode)
 {
   unsigned i = 0;
+  is_known_game = false;
 
   for (i = 0; i < sizeof(gbaover)/sizeof(gbaover[0]); i++)
   {
-     if (strcmp(gbaover[i].gamepak_code, gamecode))
+     if (strcmp(gbaover[i].gamepak_code, gamecode) != 0)
         continue;
 
      printf("gamepak code match for : %s\n", gbaover[i].gamepak_code);
+     is_known_game = true;
 
      if (gbaover[i].idle_loop_target_pc != 0)
         idle_loop_target_pc = gbaover[i].idle_loop_target_pc;
@@ -2647,78 +2652,42 @@ enum
   ROM_SIG_FLASH5  = (1 << 3)
 };
 
-static u32 rom_scan_signatures_file(void)
+static u32 rom_scan_signatures_in_memory(void)
 {
-  u32 i;
-  const u32 chunk_size = 64 * 1024;
-  u8 chunk[64 * 1024 + 32];
-  u32 overlap = 0;
-  u32 raw_size;
   u32 found = 0;
+  u32 size_left = gamepak_size;
+  u32 buf_idx = 0;
+
   const char *sig_eeprom = "EEPROM_V";
   const char *sig_sram = "SRAM_V";
   const char *sig_flash1m = "FLASH1M_V";
   const char *sig_flash512 = "FLASH512_V";
   const char *sig_flash = "FLASH_V";
-  u32 len_eeprom = (u32)strlen(sig_eeprom);
-  u32 len_sram = (u32)strlen(sig_sram);
-  u32 len_flash1m = (u32)strlen(sig_flash1m);
-  u32 len_flash512 = (u32)strlen(sig_flash512);
-  u32 len_flash = (u32)strlen(sig_flash);
-  u32 max_len = len_flash1m;
 
-  if (len_flash512 > max_len)
-    max_len = len_flash512;
-  if (len_eeprom > max_len)
-    max_len = len_eeprom;
-  if (len_sram > max_len)
-    max_len = len_sram;
-  if (len_flash > max_len)
-    max_len = len_flash;
-
-  if (!gamepak_file_large || max_len >= sizeof(chunk))
-    return 0;
-
-  raw_size = gamepak_file_blocks * 32 * 1024;
-  filestream_seek(gamepak_file_large, 0, SEEK_SET);
-
-  while (raw_size > 0)
+  while (size_left > 0 && buf_idx < gamepak_buffer_count)
   {
-    u32 to_read = raw_size > chunk_size ? chunk_size : raw_size;
-    u32 read_len = (u32)filestream_read(gamepak_file_large, &chunk[overlap], to_read);
-    u32 span = overlap + read_len;
+    u32 chunk_size = (size_left > gamepak_buffer_blocksize) ? gamepak_buffer_blocksize : size_left;
+    u8 *chunk = gamepak_buffers[buf_idx];
 
-    if (read_len == 0)
-      break;
-
-    for (i = 0; i < span; i++)
+    for (u32 i = 0; i < chunk_size - 10; i += 4)
     {
-      if (!(found & ROM_SIG_EEPROM) && i + len_eeprom <= span &&
-          memcmp(&chunk[i], sig_eeprom, len_eeprom) == 0)
-        found |= ROM_SIG_EEPROM;
-      if (!(found & ROM_SIG_SRAM) && i + len_sram <= span &&
-          memcmp(&chunk[i], sig_sram, len_sram) == 0)
-        found |= ROM_SIG_SRAM;
-      if (!(found & ROM_SIG_FLASH1M) && i + len_flash1m <= span &&
-          memcmp(&chunk[i], sig_flash1m, len_flash1m) == 0)
-        found |= ROM_SIG_FLASH1M;
-      if (!(found & ROM_SIG_FLASH5) &&
-          ((i + len_flash512 <= span && memcmp(&chunk[i], sig_flash512, len_flash512) == 0) ||
-           (i + len_flash <= span && memcmp(&chunk[i], sig_flash, len_flash) == 0)))
-        found |= ROM_SIG_FLASH5;
+      if (chunk[i] == 'E' && !(found & ROM_SIG_EEPROM) && memcmp(&chunk[i], sig_eeprom, 8) == 0) found |= ROM_SIG_EEPROM;
+      else if (chunk[i] == 'S' && !(found & ROM_SIG_SRAM) && memcmp(&chunk[i], sig_sram, 6) == 0) found |= ROM_SIG_SRAM;
+      else if (chunk[i] == 'F' && !(found & ROM_SIG_FLASH1M) && memcmp(&chunk[i], sig_flash1m, 9) == 0) found |= ROM_SIG_FLASH1M;
+      else if (chunk[i] == 'F' && !(found & ROM_SIG_FLASH5)) {
+        if (memcmp(&chunk[i], sig_flash512, 10) == 0 || memcmp(&chunk[i], sig_flash, 7) == 0)
+          found |= ROM_SIG_FLASH5;
+      }
     }
-
-    raw_size -= read_len;
-    overlap = max_len > 1 && span >= (max_len - 1) ? (max_len - 1) : span;
-    if (overlap)
-      memmove(chunk, &chunk[span - overlap], overlap);
 
     if ((found & (ROM_SIG_EEPROM | ROM_SIG_SRAM | ROM_SIG_FLASH1M | ROM_SIG_FLASH5)) ==
         (ROM_SIG_EEPROM | ROM_SIG_SRAM | ROM_SIG_FLASH1M | ROM_SIG_FLASH5))
       break;
+
+    size_left -= chunk_size;
+    buf_idx++;
   }
 
-  filestream_seek(gamepak_file_large, 0, SEEK_SET);
   return found;
 }
 
@@ -2787,7 +2756,7 @@ static void detect_backup_subcircuit(const u8 *rom, u32 rom_size)
   }
 
   if (!has_eeprom && !has_sram && !has_flash1m && !has_flash5)
-    file_sigs = rom_scan_signatures_file();
+    file_sigs = rom_scan_signatures_in_memory();
 
   if (has_eeprom ||
       (file_sigs & ROM_SIG_EEPROM))
@@ -2870,54 +2839,69 @@ u32 load_gamepak(const struct retro_game_info* info, const char *name,
    {
       u32 scan_size = gamepak_size < (1024*1024) ? gamepak_size : (1024*1024);
       detect_backup_subcircuit(gamepak_buffers[0], scan_size);
-    }
+   }
 
-   /* Second pass: scan the full ROM file if still undetected.
-    * ROM hacks (especially large Pokemon hacks) and NSP-extracted ROMs
-    * may place backup strings beyond the first 1MB buffer.
-    * rom_scan_signatures_file() reads the whole file in chunks. */
-   if (backup_type_reset == BACKUP_UNKN)
+   bool is_128k_flash = (backup_type_reset == BACKUP_FLASH && flash_bank_cnt == FLASH_SIZE_128KB);
+   bool is_pokemon_engine = rom_is_pokemon_family(gamepak_buffers[0]) || is_128k_flash;
+
+   require_m1_hle_bios = false;
+   
+   bool title_altered = false;
+   bool is_expanded = (gamepak_size > 16777216);
+   
+   if (rom_is_pokemon_family(gamepak_buffers[0]))
    {
-      u32 file_sigs = rom_scan_signatures_file();
-      if (file_sigs & ROM_SIG_EEPROM)
+      char title[13];
+      memcpy(title, &gamepak_buffers[0][0xA0], 12);
+      title[12] = '\0';
+      
+      if (strncmp(title, "POKEMON FIRE", 12) != 0 &&
+          strncmp(title, "POKEMON LEAF", 12) != 0 &&
+          strncmp(title, "POKEMON EMER", 12) != 0 &&
+          strncmp(title, "POKEMON RUBY", 12) != 0 &&
+          strncmp(title, "POKEMON SAPP", 12) != 0)
       {
-         backup_type_reset = BACKUP_EEPROM;
-      }
-      else if (file_sigs & ROM_SIG_FLASH1M)
-      {
-         backup_type_reset = BACKUP_FLASH;
-         flash_bank_cnt    = FLASH_SIZE_128KB;
-         flash_device_id   = FLASH_DEVICE_SANYO_128KB;
-      }
-      else if (file_sigs & ROM_SIG_FLASH5)
-      {
-         backup_type_reset = BACKUP_FLASH;
-         flash_bank_cnt    = FLASH_SIZE_64KB;
-         flash_device_id   = FLASH_DEVICE_MACRONIX_64KB;
-      }
-      else if (file_sigs & ROM_SIG_SRAM)
-      {
-         backup_type_reset = BACKUP_SRAM;
+         title_altered = true;
       }
    }
 
-   if (backup_type_reset == BACKUP_FLASH &&
-       flash_bank_cnt == FLASH_SIZE_128KB &&
-       rom_is_pokemon_family(gamepak_buffers[0]))
+   bool is_hack = gamepak_header_nonstandard || !is_known_game || title_altered || (is_expanded && is_pokemon_engine);
+
+   if (is_hack && is_pokemon_engine)
    {
+      backup_type_reset = BACKUP_FLASH;
+      flash_bank_cnt = FLASH_SIZE_128KB;
+      flash_device_id = FLASH_DEVICE_SANYO_128KB;
       rtc_enabled = true;
-      if (serial_mode == SERIAL_MODE_AUTO)
+      require_m1_hle_bios = true;
+      
+      if (force_serial == SERIAL_MODE_AUTO)
          serial_mode = SERIAL_MODE_SERIAL_POKE;
    }
+   else if (!is_hack && rom_is_pokemon_family(gamepak_buffers[0]))
+   {
+      if (flash_bank_cnt == FLASH_SIZE_128KB)
+         rtc_enabled = true;
 
+      if (force_serial == SERIAL_MODE_AUTO)
+      {
+         if (strncmp(game_code, "AXV", 3) == 0 || strncmp(game_code, "AXP", 3) == 0)
+         {
+            serial_mode = SERIAL_MODE_SERIAL_POKE;
+         }
+         else
+         {
+            serial_mode = SERIAL_MODE_RFU;
+         }
+      }
+   }
+	
    normalize_blank_backup_for_detected_type();
 
-   // Keep runtime backup logic aligned with autodetected/reset type.
    backup_type = backup_type_reset;
    flash_mode = FLASH_BASE_MODE;
    flash_bank_num = 0;
 
-   // Forced RTC / Rumble modes, override the autodetect logic.
    if (force_rtc != FEAT_AUTODETECT)
       rtc_enabled = (force_rtc == FEAT_ENABLE);
    if (force_rumble != FEAT_AUTODETECT)

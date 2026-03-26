@@ -1143,12 +1143,11 @@ bool retro_load_game(const struct retro_game_info* info)
       memcpy(bios_rom, open_gba_bios_rom, sizeof(bios_rom));
    }
 
-   if (selected_bios != builtin_bios &&
-       backup_type == BACKUP_FLASH &&
-       flash_bank_cnt == FLASH_SIZE_128KB &&
-       serial_mode == SERIAL_MODE_SERIAL_POKE)
+   extern bool require_m1_hle_bios;
+
+   if (selected_bios != builtin_bios && require_m1_hle_bios)
    {
-      show_warning_message("Pokemon M1 profile detected, using built-in BIOS", 2500);
+      show_warning_message("Pokemon ROM Hack (M1) detected, forcing built-in BIOS", 2500);
       memcpy(bios_rom, open_gba_bios_rom, sizeof(bios_rom));
    }
 
