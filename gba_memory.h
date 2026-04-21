@@ -205,12 +205,14 @@ typedef enum
 #define FLASH_DEVICE_SST_64K         0xD4
 #define FLASH_DEVICE_PANASONIC_64KB  0x1B
 #define FLASH_DEVICE_MACRONIX_128KB  0x09
+#define FLASH_DEVICE_SANYO_128KB     0x13
 
 
 #define FLASH_MANUFACTURER_MACRONIX  0xC2
 #define FLASH_MANUFACTURER_AMTEL     0x1F
 #define FLASH_MANUFACTURER_PANASONIC 0x32
 #define FLASH_MANUFACTURER_SST       0xBF
+#define FLASH_MANUFACTURER_SANYO     0x62
 
 u32 function_cc read_memory8(u32 address);
 u32 function_cc read_memory8s(u32 address);
@@ -238,6 +240,8 @@ extern u8 ws_cyc_seq[16][2];
 extern u8 ws_cyc_nseq[16][2];
 
 extern u32 gamepak_size;
+extern bool gamepak_mini_materialized;
+extern bool gamepak_header_nonstandard;
 extern char gamepak_code[5];
 extern char gamepak_filename[512];
 
