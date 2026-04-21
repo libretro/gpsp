@@ -1296,7 +1296,8 @@ void retro_run(void)
    }
 
    audio_run();
-   video_run();
+   if (!skip_next_frame)
+     video_run();
 
    switch (serial_mode) {
    case SERIAL_MODE_RFU:
