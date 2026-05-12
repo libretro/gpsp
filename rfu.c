@@ -242,14 +242,19 @@ void rfu_reset() {
   // Clear all the received broadcasts.
   memset(&rfu_peer_bcst, 0, sizeof(rfu_peer_bcst));
 
-  // Re-seed random gen.
-  rand_seed(time(NULL));
+  // Re-seed random gen.  cpu_ticks is determined by the GBA program and
+  // is therefore replay-reproducible; time(NULL) is not, and would break
+  // record/replay or netplay rollback if used here.  The seed only needs
+  // to vary across resets within a session, which cpu_ticks already
+  // satisfies (rfu_reset is called from a GPIO pulse driven by the game).
   rand_seed(cpu_ticks);
 }
 
 static u16 new_devid() {
   while (1) {
-    u16 n = rand_gen() ^ time(NULL);
+    /* Mix in cpu_ticks (deterministic) rather than time(NULL) so the
+     * generated device ID is reproducible across record/replay. */
+    u16 n = rand_gen() ^ (u16)cpu_ticks;
     if (n)
       return n;
   }

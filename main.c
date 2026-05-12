@@ -384,6 +384,11 @@ bool main_read_savestate(const u8 *src)
       serial_set_irq_cycles(0);   /* Older states: no pending IRQ. */
   }
 
+  /* random_state is also optional for backwards compat. Missing means
+   * 'use whatever is currently in the static'; the RFU path will reseed
+   * from cpu_ticks on the next rfu_reset, which is also deterministic. */
+  bson_read_int32(p1, "rand-state", &random_state);
+
   for (i = 0; i < 4; i++)
   {
     char tname[2] = {'0' + i, 0};
@@ -414,6 +419,7 @@ unsigned main_write_savestate(u8* dst)
   bson_write_int32(dst, "video-count", video_count);
   bson_write_int32(dst, "sleep-cycles", reg[REG_SLEEP_CYCLES]);
   bson_write_int32(dst, "serial-irq-cycles", serial_get_irq_cycles());
+  bson_write_int32(dst, "rand-state", random_state);
   bson_finish_document(dst, wbptr);
 
   bson_start_document(dst, "timers", wbptr);
