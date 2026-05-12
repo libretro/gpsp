@@ -957,28 +957,29 @@ static inline void render_scanline_bitmap(
     }
 
     pixfmt val = 0;
-    for (u32 i = 0; start < end; start++) {
+    u32 mctr = 0;
+    for (u32 i = 0; start < end; start++, i++) {
       u32 pixel_x = (u32)(source_x >> 8), pixel_y = (u32)(source_y >> 8);
 
       // Check if we run out of background pixels, stop drawing.
       if (pixel_x >= width || pixel_y >= height)
         break;
 
-      // Lookup pixel and draw it.
-      // NOTE: 'i' is declared but never incremented in this branch
-      // (pre-existing).  i % mosh is therefore constant-propagated to
-      // 0 % mosh == 0 and !(i % mosh) is always true at runtime; gcc
-      // elides the divide entirely.  Left as-is - the counter-based
-      // rewrite applied to the other mosaic sites is unnecessary here
-      // and would mask the latent bug that 'i' never advances.  Any
-      // fix to the mosaic semantics belongs in a separate correctness
-      // patch with reference-renderer comparison.
-      if (!mosaic || !(i % mosh)) {
+      // Lookup pixel and draw it.  Counter-based mosaic (see
+      // render_affine_background).  Before this fix the loop counter
+      // 'i' was declared but never incremented; gcc constant-folded
+      // 'i % mosh' to !0 and the mosaic skip never triggered, so the
+      // rotated-bitmap mode-3/4/5 paths sampled every pixel instead of
+      // every Nth.  Matches the SCALED-bitmap and affine-object paths,
+      // which both honor BG2 horizontal mosaic correctly.
+      if (!mosaic || !mctr) {
         pixfmt *valptr = &src_ptr[pixel_x + (pixel_y * width)];
         val = sizeof(pixfmt) == 2 ? eswap16(*valptr) : *valptr;
+        mctr = mosh;
       }
 
       bitmap_pixel_write<rdtype, dsttype, mode, pixfmt>(dst_ptr++, val, palptr, px_attr);
+      if (mosaic) mctr--;
 
       // Move to the next pixel, update coords accordingly
       source_x += dx;
