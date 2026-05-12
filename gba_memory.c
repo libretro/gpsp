@@ -2744,8 +2744,9 @@ static u32 rom_scan_signatures_in_memory(void)
   {
     u32 chunk_size = (size_left > gamepak_buffer_blocksize) ? gamepak_buffer_blocksize : size_left;
     u8 *chunk = gamepak_buffers[buf_idx];
+    u32 i;
 
-    for (u32 i = 0; i < chunk_size - 10; i += 4)
+    for (i = 0; i < chunk_size - 10; i += 4)
     {
       if (chunk[i] == 'E' && !(found & ROM_SIG_EEPROM) && memcmp(&chunk[i], sig_eeprom, 8) == 0) found |= ROM_SIG_EEPROM;
       else if (chunk[i] == 'S' && !(found & ROM_SIG_SRAM) && memcmp(&chunk[i], sig_sram, 6) == 0) found |= ROM_SIG_SRAM;
