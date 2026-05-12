@@ -371,6 +371,48 @@ typedef enum
   x86_emit_byte(x86_opcode_call_offset);                                      \
   x86_emit_dword(relative_offset)                                             \
 
+/* Win64 ABI requires the caller to reserve 32 bytes of "shadow space" on
+ * the stack before a call, into which the callee may spill its incoming
+ * register arguments (rcx, rdx, r8, r9).  Without it, the callee's spill
+ * stores land on top of whatever lives below the JIT block's return
+ * address - in execute_arm_translate_internal's frame that area holds
+ * the SAVE_REGISTERS-saved rbp/rdi/rsi/rbx.  Those then come back wrong
+ * from REST_REGISTERS and corrupt RetroArch's runloop_iterate state on
+ * return (most visibly: rbp, which the host C compiler may pin to a
+ * struct base across the retro_run call boundary).  The crash is
+ * release-only (debug builds use the interpreter) and amplified by
+ * fast-forward (more JIT entries per wall-clock second).
+ *
+ * We emit a 40-byte adjustment, not 32: rsp is misaligned by 8 inside
+ * execute_arm_translate_internal (entry ret addr + 4*8 callee-saved
+ * pushes leave it at X-40, i.e. 16-byte-aligned + 8).  At a JIT call
+ * site we further want rsp to be 16-byte-aligned + 8 right before the
+ * call instruction itself so the callee sees a 16-aligned stack.
+ * sub $40, %rsp from X-40 lands at X-80 (16-aligned), the call pushes
+ * 8 to land at X-88 -> callee entry sees 16-aligned + 8, as the ABI
+ * requires.  32 alone would leave the callee misaligned and the
+ * compiler's SSE spills in the prologue would fault on the first
+ * aligned movaps. */
+#if defined(_WIN64)
+  #define x86_emit_winabi_shadow_alloc()                                       \
+  {                                                                           \
+    x86_emit_byte(0x48);   /* REX.W */                                        \
+    x86_emit_byte(0x83);   /* sub r/m64, imm8 */                              \
+    x86_emit_byte(0xEC);   /* /5, rm=rsp */                                   \
+    x86_emit_byte(0x28);   /* 40 */                                           \
+  }
+  #define x86_emit_winabi_shadow_free()                                        \
+  {                                                                           \
+    x86_emit_byte(0x48);                                                      \
+    x86_emit_byte(0x83);   /* add r/m64, imm8 */                              \
+    x86_emit_byte(0xC4);   /* /0, rm=rsp */                                   \
+    x86_emit_byte(0x28);                                                      \
+  }
+#else
+  #define x86_emit_winabi_shadow_alloc()
+  #define x86_emit_winabi_shadow_free()
+#endif
+
 #define x86_emit_ret()                                                        \
   x86_emit_byte(x86_opcode_ret)                                               \
 
@@ -566,8 +608,10 @@ typedef enum
 
 
 #define generate_function_call(function_location)                             \
+  x86_emit_winabi_shadow_alloc();                                             \
   x86_emit_call_offset(x86_relative_offset(translation_ptr,                   \
    function_location, 4));                                                    \
+  x86_emit_winabi_shadow_free();                                              \
 
 #define generate_exit_block()                                                 \
   x86_emit_ret();                                                             \
