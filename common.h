@@ -20,6 +20,26 @@
 #ifndef COMMON_H
 #define COMMON_H
 
+/* Endianness: gpSP uses MSB_FIRST as the single source of truth for big-
+ * endian targets. Toolchain-specific macros are mapped onto MSB_FIRST here
+ * so that the rest of the codebase can use one consistent token. Define
+ * -DMSB_FIRST in CFLAGS (or rely on the auto-detection below) on big-endian
+ * hosts; little-endian is the default when MSB_FIRST is not defined.
+ */
+#ifndef MSB_FIRST
+  #if defined(__BYTE_ORDER__) && defined(__ORDER_BIG_ENDIAN__) &&             \
+      (__BYTE_ORDER__ == __ORDER_BIG_ENDIAN__)
+    #define MSB_FIRST 1
+  #elif defined(__BIG_ENDIAN__)
+    #define MSB_FIRST 1
+  #elif defined(_BIG_ENDIAN) && !defined(_LITTLE_ENDIAN)
+    #define MSB_FIRST 1
+  #elif defined(__BYTE_ORDER) && defined(__BIG_ENDIAN) &&                     \
+      (__BYTE_ORDER == __BIG_ENDIAN)
+    #define MSB_FIRST 1
+  #endif
+#endif
+
 #define ror(dest, value, shift)                                               \
   dest = ((value) >> (shift)) | ((value) << (32 - (shift)))                   \
 
@@ -95,7 +115,7 @@
 #define GBA_SCREEN_BUFFER_SIZE  \
   (GBA_SCREEN_PITCH * (GBA_SCREEN_HEIGHT + 1) * sizeof(uint16_t))
 
-#if __BYTE_ORDER__ == __ORDER_BIG_ENDIAN__
+#ifdef MSB_FIRST
   #define netorder32(value) (value)
 #else
   #define netorder32(value) __builtin_bswap32(value)
@@ -138,7 +158,7 @@ typedef u32 fixed8_24;
   *((u32 *)((u8 *)base + (offset)))                                           \
 
 #define eswap8(value)  (value)
-#if __BYTE_ORDER__ == __ORDER_BIG_ENDIAN__
+#ifdef MSB_FIRST
   #define eswap16(value) __builtin_bswap16(value)
   #define eswap32(value) __builtin_bswap32(value)
 #else
