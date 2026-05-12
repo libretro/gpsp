@@ -202,6 +202,10 @@ void cheat_clear()
       cheats[i].cheat_count = 0;
       cheats[i].cheat_active = false;
    }
+   /* Reset the scan high-water-mark too: otherwise process_cheats keeps
+    * iterating over inactive slots from the previous game's cheat set,
+    * wasting cycles on every vblank. */
+   max_cheat = 0;
    cheat_master_hook = 0xffffffff;
 }
 
@@ -209,16 +213,21 @@ cheat_error cheat_parse(unsigned index, const char *code)
 {
    int pos = 0;
    int codelen = strlen(code);
-   cheat_type *ch = &cheats[index];
+   cheat_type *ch;
    char buf[1024];
-   
+
+   /* Bounds-check before constructing the cheat pointer. Forming
+    * '&cheats[index]' with an out-of-range index is undefined behavior
+    * per C even if the pointer is never dereferenced. */
    if (index >= MAX_CHEATS)
       return CheatErrorTooMany;
    if (codelen >= sizeof(buf))
       return CheatErrorTooBig;
 
+   ch = &cheats[index];
+
    memcpy(buf, code, codelen+1);
-   
+
    /* Init to a known good state */
    ch->cheat_count = 0;
    if (index > max_cheat)
