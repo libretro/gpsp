@@ -1084,7 +1084,7 @@ static void set_memory_descriptors(void)
 
 bool retro_load_game(const struct retro_game_info* info)
 {
-   if (!info)
+   if (!info || !info->path)
       return false;
 
    check_variables(true);
