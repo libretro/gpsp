@@ -1233,6 +1233,44 @@ u32 rtc_data_bits;
 u32 rtc_status = 0x40;
 s32 rtc_bit_count;
 
+/* Baseline UNIX time captured at content load. The emulated RTC reports
+ * (rtc_base_time + frame_counter * GBA_FRAME_SECONDS), so the visible
+ * clock keeps its real-time feel (one in-game second per second of
+ * native emulation, faster when fast-forwarding - matching real GBA
+ * behaviour where the RTC oscillator is independent of the CPU) while
+ * being fully determined by frame_counter and rtc_base_time. Both
+ * round-trip through the savestate, so a replay from any saved state
+ * reproduces the same in-game clock. Without this, the RTC fed
+ * wall-clock time straight into the game's bit-stream on every read,
+ * making record/replay and cross-machine state sharing impossible for
+ * RTC-using titles (Pokemon Ruby/Sapphire/Emerald, Boktai series,
+ * Sennen Kazoku, Rockman EXE 4.5, etc.).
+ *
+ * frame_counter is chosen over cpu_ticks as the time source because
+ * cpu_ticks is u32 and wraps every ~256 seconds at the native cycle
+ * rate, which would rewind the in-game clock every few minutes.
+ * frame_counter wraps after ~2.27 years of continuous emulation. */
+static s64 rtc_base_time = 0;
+
+/* Cycles per frame at the native rate; same divisor at the 60FPS
+ * overclock since GBC_BASE_RATE scales correspondingly. */
+#define GBA_CYCLES_PER_FRAME 280896
+#define GBA_FRAME_SECONDS    ((double)GBA_CYCLES_PER_FRAME / (double)GBC_BASE_RATE)
+
+static void rtc_init_base_time(void)
+{
+  time_t t;
+  time(&t);
+  rtc_base_time = (s64)t;
+}
+
+static time_t rtc_current_time(void)
+{
+  return (time_t)(rtc_base_time +
+                  (s64)((double)frame_counter * GBA_FRAME_SECONDS));
+}
+
+
 // Rumble trackin vars, not really preserved (it's just aproximate)
 static u32 rumble_enable_tick, rumble_ticks;
 
@@ -1312,8 +1350,7 @@ static void write_rtc(u8 old, u8 new)
         case RTC_COMMAND_OUTPUT_TIME_FULL:
           {
             struct tm *current_time;
-            time_t current_time_flat;
-            time(&current_time_flat);
+            time_t current_time_flat = rtc_current_time();
             current_time = localtime(&current_time_flat);
 
             rtc_state = RTC_OUTPUT_DATA;
@@ -1330,8 +1367,7 @@ static void write_rtc(u8 old, u8 new)
         case RTC_COMMAND_OUTPUT_TIME:
           {
             struct tm *current_time;
-            time_t current_time_flat;
-            time(&current_time_flat);
+            time_t current_time_flat = rtc_current_time();
             current_time = localtime(&current_time_flat);
 
             rtc_state = RTC_OUTPUT_DATA;
@@ -2452,6 +2488,15 @@ bool memory_read_savestate(const u8 *src)
     bson_read_int32_array(bakdoc, "rtc-data-words", rtc_data_array, 2)))
     return false;
 
+  /* rtc-base-time is optional for forward-compat with states written
+   * before deterministic RTC; if absent, keep whatever load_gamepak
+   * captured at content load. */
+  {
+    u32 base_words[2] = {0, 0};
+    if (bson_read_int32_array(bakdoc, "rtc-base-time", base_words, 2))
+      rtc_base_time = (s64)((u64)base_words[0] | (((u64)base_words[1]) << 32));
+  }
+
   for (i = 0; i < DMA_CHAN_CNT; i++)
   {
     char tname[2] = {'0' + i, 0};
@@ -2513,6 +2558,11 @@ unsigned memory_write_savestate(u8 *dst)
   bson_write_int32(dst, "rtc-data-bit-cnt", rtc_data_bits);
   bson_write_int32(dst, "rtc-bit-cnt", rtc_bit_count);
   bson_write_int32array(dst, "rtc-data-words", rtc_data_array, 2);
+  {
+    u32 base_words[2] = { (u32)(u64)rtc_base_time,
+                          (u32)(((u64)rtc_base_time) >> 32) };
+    bson_write_int32array(dst, "rtc-base-time", base_words, 2);
+  }
   bson_finish_document(dst, wbptr);
 
   bson_start_document(dst, "dma", wbptr);
@@ -2932,6 +2982,14 @@ u32 load_gamepak(const struct retro_game_info* info, const char *name,
       rtc_enabled = (force_rtc == FEAT_ENABLE);
    if (force_rumble != FEAT_AUTODETECT)
       rumble_enabled = (force_rumble == FEAT_ENABLE);
+
+   /* Capture the RTC baseline once per content load (and only here -
+    * not in init_memory/reset_gba, so a retro_reset does not change the
+    * baseline; the in-game clock instead snaps back to the load-time
+    * point since frame_counter is reset to 0).  This makes the entire
+    * RTC stream a deterministic function of frame_counter and
+    * rtc_base_time, both of which are persisted in the savestate. */
+   rtc_init_base_time();
 
    return 0;
 }
