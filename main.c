@@ -389,6 +389,17 @@ bool main_read_savestate(const u8 *src)
    * from cpu_ticks on the next rfu_reset, which is also deterministic. */
   bson_read_int32(p1, "rand-state", &random_state);
 
+  /* gbp-state is optional for backwards compat.  Older states either
+   * never had a GBP session active or are post-handshake (steady-state
+   * loop where missing the precise gbp_seq_n is harmless within a few
+   * frames).  Default: don't touch the in-memory values, gbp_reset
+   * runs at content load and that's a safe starting point. */
+  {
+    u32 gbps;
+    if (bson_read_int32(p1, "gbp-state", &gbps))
+      gbp_set_state(gbps);
+  }
+
   for (i = 0; i < 4; i++)
   {
     char tname[2] = {'0' + i, 0};
@@ -420,6 +431,7 @@ unsigned main_write_savestate(u8* dst)
   bson_write_int32(dst, "sleep-cycles", reg[REG_SLEEP_CYCLES]);
   bson_write_int32(dst, "serial-irq-cycles", serial_get_irq_cycles());
   bson_write_int32(dst, "rand-state", random_state);
+  bson_write_int32(dst, "gbp-state", gbp_get_state());
   bson_finish_document(dst, wbptr);
 
   bson_start_document(dst, "timers", wbptr);
