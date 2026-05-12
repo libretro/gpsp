@@ -209,6 +209,23 @@ void cheat_clear()
    cheat_master_hook = 0xffffffff;
 }
 
+/* Soft-disable: keep the parsed code data in place so a future
+ * cheat_parse() with the same index would not be strictly required
+ * to re-enable, but flip cheat_active=false so process_cheats()
+ * skips it.  Out-of-range indices are silently ignored.
+ *
+ * Note we do NOT clear cheat_master_hook here even if this cheat
+ * was the one that installed it: process_cheats short-circuits on
+ * !cheat_active so the stale hook is observationally harmless, and
+ * recomputing it would require scanning the other cheats which is
+ * unnecessary overhead for a libretro-frontend toggle path. */
+void cheat_disable(unsigned index)
+{
+   if (index >= MAX_CHEATS)
+      return;
+   cheats[index].cheat_active = false;
+}
+
 cheat_error cheat_parse(unsigned index, const char *code)
 {
    int pos = 0;

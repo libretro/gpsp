@@ -822,7 +822,18 @@ void retro_cheat_reset(void)
 void retro_cheat_set(unsigned index, bool enabled, const char* code)
 {
    if (!enabled)
+   {
+      /* Per the libretro contract, retro_cheat_set with enabled=false
+       * must deactivate the cheat at this index.  Without this, a user
+       * toggling a cheat off in the frontend would have no effect:
+       * the cheat would stay active until the next retro_cheat_reset()
+       * or content load.  Note RetroArch typically calls
+       * retro_cheat_reset followed by a full reapply on every change,
+       * so the visible bug surface is small, but other frontends and
+       * runtime API callers can hit this directly. */
+      cheat_disable(index);
       return;
+   }
 
    switch (cheat_parse(index, code))
    {
