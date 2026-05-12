@@ -230,10 +230,14 @@ static void video_post_process_mix(void)
    /* Flat loop: pitch equals width so the row-stride bookkeeping in
     * the original two-level form was bookkeeping for no actual stride
     * mismatch.  Compilers can vectorize the flat loop more aggressively;
-    * on ARM Cortex-A it makes a measurable difference at -O2.  The
-    * per-pixel snapshot of src_curr into src_prev has been hoisted out
-    * to a single memcpy after the loop - SIMD-vectorized by libc and
-    * eliminates the interleaved scalar stores. */
+    * on ARM Cortex-A it makes a measurable difference at -O2.  After the
+    * mix we used to memcpy(prev, curr, 75 KB) so the next frame's mix
+    * could read the previous frame; that copy is now elided by swapping
+    * the two buffer pointers - after the swap, gba_screen_pixels points
+    * to what was the prev buffer (about to be overwritten by the next
+    * scanline-render pass), and gba_screen_pixels_prev points at the
+    * just-rendered frame.  Saves ~4.5 MB/s of memory bandwidth at 60 fps
+    * with mix enabled. */
    const uint16_t *src_curr = gba_screen_pixels;
    const uint16_t *src_prev = gba_screen_pixels_prev;
    uint16_t       *dst      = gba_processed_pixels;
@@ -250,12 +254,24 @@ static void video_post_process_mix(void)
       dst[i] = (rgb_curr + rgb_prev + ((rgb_curr ^ rgb_prev) & 0x821)) >> 1;
    }
 
-   memcpy(gba_screen_pixels_prev, gba_screen_pixels, GBA_SCREEN_BUFFER_SIZE);
+   /* Swap curr/prev: the just-rendered frame becomes prev for next time,
+    * and the previous prev (now stale and about to be overwritten by the
+    * next render pass) becomes the new render target.  Equivalent to the
+    * old 'memcpy(prev, curr, GBA_SCREEN_BUFFER_SIZE)' but without the
+    * copy.  Safe because the scanline renderer fully overwrites every
+    * pixel of gba_screen_pixels before any read (fill_line_background
+    * runs first per scanline) - no read-before-write hazard on the
+    * post-swap buffer. */
+   {
+      u16 *t = gba_screen_pixels;
+      gba_screen_pixels = gba_screen_pixels_prev;
+      gba_screen_pixels_prev = t;
+   }
 }
 
 static void video_post_process_cc_mix(void)
 {
-   /* See video_post_process_mix for the loop-flatten + bulk-memcpy
+   /* See video_post_process_mix for the loop-flatten + buffer-swap
     * rationale.  Same shape, plus the gba_cc_lut colour-correction
     * lookup on the mixed value. */
    const uint16_t *src_curr = gba_screen_pixels;
@@ -275,7 +291,11 @@ static void video_post_process_cc_mix(void)
       dst[i] = gba_cc_lut[((rgb_mix & 0xFFC0) >> 1) | (rgb_mix & 0x1F)];
    }
 
-   memcpy(gba_screen_pixels_prev, gba_screen_pixels, GBA_SCREEN_BUFFER_SIZE);
+   {
+      u16 *t = gba_screen_pixels;
+      gba_screen_pixels = gba_screen_pixels_prev;
+      gba_screen_pixels_prev = t;
+   }
 }
 
 static void init_post_processing(void)
