@@ -5,6 +5,7 @@
 #include <stdint.h>
 
 #include <streams/file_stream.h>
+#include <compat/strl.h>
 #include <libretro.h>
 
 #include "../common.h"
@@ -822,15 +823,16 @@ void retro_cheat_set(unsigned index, bool enabled, const char* code)
 
 static void extract_directory(char* buf, const char* path, size_t size)
 {
-   strncpy(buf, path, size - 1);
-   buf[size - 1] = '\0';
+   char* base;
 
-   char* base = strrchr(buf, '/');
+   strlcpy(buf, path, size);
+
+   base = strrchr(buf, '/');
 
    if (base)
       *base = '\0';
    else
-      strncpy(buf, ".", size);
+      strlcpy(buf, ".", size);
 }
 
 static void check_variables(bool started_from_load)
@@ -1099,16 +1101,24 @@ bool retro_load_game(const struct retro_game_info* info)
 
    extract_directory(main_path, info->path, sizeof(main_path));
 
-   if (environ_cb(RETRO_ENVIRONMENT_GET_SYSTEM_DIRECTORY, &dir) && dir)
-      strcpy(filename_bios, dir);
-   else
-      strcpy(filename_bios, main_path);
-
    bool bios_loaded = false;
    if (selected_bios == auto_detect || selected_bios == official_bios)
    {
+     /* Build '<dir>/gba_bios.bin'.  strlcpy returns the source length,
+      * so we can reuse it as the offset for the suffix append - one
+      * less strlen call than a strlcat-style pattern, and bounded
+      * against MAX_PATH overflow either way.  If the directory path
+      * was already truncated (len >= sizeof(filename_bios)), the
+      * subsequent load_bios will fail and we fall back to the
+      * built-in BIOS - the right outcome for a pathological frontend
+      * path. */
+     const char *base_dir = (environ_cb(RETRO_ENVIRONMENT_GET_SYSTEM_DIRECTORY, &dir) && dir)
+                            ? dir : main_path;
+     size_t len = strlcpy(filename_bios, base_dir, sizeof(filename_bios));
+     if (len < sizeof(filename_bios))
+        strlcpy(filename_bios + len, "/gba_bios.bin", sizeof(filename_bios) - len);
+
      bios_loaded = true;
-     strcat(filename_bios, "/gba_bios.bin");
 
      if (load_bios(filename_bios) != 0)
      {

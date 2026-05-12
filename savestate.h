@@ -40,8 +40,11 @@
    ((u32)(p)[1] <<  8) | ((u32)(p)[0] <<  0))
 
 #define bson_write_cstring(p, value)            \
-  memcpy(p, value, strlen(value)+1);            \
-  p += strlen(value)+1;
+  do {                                          \
+    size_t __bson_clen = strlen(value) + 1;     \
+    memcpy(p, value, __bson_clen);              \
+    p += __bson_clen;                           \
+  } while (0)
 
 #define bson_write_int32(p, key, value)         \
   *p++ = 0x10;                                  \
