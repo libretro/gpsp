@@ -335,6 +335,9 @@ bool main_check_savestate(const u8 *src)
       !bson_contains_key(p1, "video-count", BSON_TYPE_INT32) ||
       !bson_contains_key(p1, "sleep-cycles", BSON_TYPE_INT32))
     return false;
+  /* serial-irq-cycles is optional for forward compatibility with states
+   * written before this field existed; missing simply means "no pending
+   * serial IRQ", which is also the default after serialproto_reset. */
 
   for (i = 0; i < 4; i++)
   {
@@ -373,6 +376,14 @@ bool main_read_savestate(const u8 *src)
   if (!bson_read_int32(p1, "frame-count", &frame_counter))
     frame_counter = 60 * 10;  // Use "fake" 10 seconds.
 
+  {
+    u32 sirq;
+    if (bson_read_int32(p1, "serial-irq-cycles", &sirq))
+      serial_set_irq_cycles(sirq);
+    else
+      serial_set_irq_cycles(0);   /* Older states: no pending IRQ. */
+  }
+
   for (i = 0; i < 4; i++)
   {
     char tname[2] = {'0' + i, 0};
@@ -402,6 +413,7 @@ unsigned main_write_savestate(u8* dst)
   bson_write_int32(dst, "exec-cycles", execute_cycles);
   bson_write_int32(dst, "video-count", video_count);
   bson_write_int32(dst, "sleep-cycles", reg[REG_SLEEP_CYCLES]);
+  bson_write_int32(dst, "serial-irq-cycles", serial_get_irq_cycles());
   bson_finish_document(dst, wbptr);
 
   bson_start_document(dst, "timers", wbptr);

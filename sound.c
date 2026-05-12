@@ -652,6 +652,17 @@ bool sound_read_savestate(const u8 *src)
   int i;
   const u8 *snddoc = bson_find_key(src, "sound");
 
+  /* The 128KiB ring buffer holding rendered samples is intentionally not
+   * serialized (it would inflate the savestate well beyond its hard size
+   * cap). Zero it on load so that the gbc_sound and direct_sound mixers,
+   * which use += into this buffer, do not pick up stale data from before
+   * the load. The saved buffer_base / buffer_index pair remains valid
+   * against this zero-filled ring: any range that was 'in flight' at save
+   * time decodes as silence after load instead of random pre-load mix.
+   * This makes audio output deterministic across save/load at the cost of
+   * up to one frame of silence at the load point. */
+  memset(sound_buffer, 0, sizeof(sound_buffer));
+
   if (!(
     bson_read_int32(snddoc, "on", &sound_on) &&
     bson_read_int32(snddoc, "buf-base", &sound_buffer_base) &&

@@ -35,6 +35,10 @@ cpu_alert_type write_rcnt(u16 value);
 u32 serial_next_event();
 bool update_serial(unsigned cycles);
 
+// Savestate accessors
+u32 serial_get_irq_cycles(void);
+void serial_set_irq_cycles(u32 v);
+
 // RFU interface
 void rfu_reset(void);
 bool rfu_update(unsigned cycles);

@@ -175,15 +175,28 @@ u32 update_input(void)
 bool input_check_savestate(const u8 *src)
 {
   const u8 *p = bson_find_key(src, "input");
+  /* Only 'prevkey' is required for backwards compatibility. The other
+   * fields are optional and default to a safe state on load. */
   return (p && bson_contains_key(p, "prevkey", BSON_TYPE_INT32));
 }
 
 bool input_read_savestate(const u8 *src)
 {
   const u8 *p = bson_find_key(src, "input");
-  if (p)
-    return bson_read_int32(p, "prevkey", &old_key);
-  return false;
+  u32 v;
+  if (!p)
+    return false;
+  if (!bson_read_int32(p, "prevkey", &old_key))
+    return false;
+
+  /* Optional turbo and GBP fields - default to neutral state when
+   * absent (older savestates).  Without these, turbo-button pulse and
+   * GBP detection desync across save/load, breaking input determinism. */
+  turbo_a_counter   = bson_read_int32(p, "turbo-a", &v) ? v : 0;
+  turbo_b_counter   = bson_read_int32(p, "turbo-b", &v) ? v : 0;
+  gbp_keypad_frames = bson_read_int32(p, "gbp-frames", &v) ? v : 0;
+  gbp_keypad_sent   = bson_read_int32(p, "gbp-sent",   &v) ? (v != 0) : false;
+  return true;
 }
 
 unsigned input_write_savestate(u8 *dst)
@@ -191,6 +204,10 @@ unsigned input_write_savestate(u8 *dst)
   u8 *wbptr1, *startp = dst;
   bson_start_document(dst, "input", wbptr1);
   bson_write_int32(dst, "prevkey", old_key);
+  bson_write_int32(dst, "turbo-a", turbo_a_counter);
+  bson_write_int32(dst, "turbo-b", turbo_b_counter);
+  bson_write_int32(dst, "gbp-frames", gbp_keypad_frames);
+  bson_write_int32(dst, "gbp-sent", gbp_keypad_sent ? 1 : 0);
   bson_finish_document(dst, wbptr1);
   return (unsigned int)(dst - startp);
 }
