@@ -272,6 +272,9 @@ static void trigger_timer(u32 timer_number, u32 value)
    write_ioreg(REG_TMXCNT(timer_number), value);
 }
 
+bool is_known_game = false;
+bool require_m1_hle_bios = false;
+
 /* Memory timings */
 const u8 ws012_nonseq[] = {4, 3, 2, 8};
 const u8 ws0_seq[] = {2, 1};
@@ -352,6 +355,11 @@ dma_transfer_type dma[4];
 u8 *gamepak_buffers[32];    /* Pointers to malloc'ed blocks */
 u32 gamepak_buffer_count;   /* Value between 1 and 32 */
 u32 gamepak_size;           /* Size of the ROM in bytes */
+u32 gamepak_file_blocks;    /* Physical payload size in 32KB blocks */
+bool gamepak_mirror_1m;     /* 1MiB Classic NES/Famicom Mini mirror mode */
+static u8 *gamepak_mini_rom;
+bool gamepak_mini_materialized;
+bool gamepak_header_nonstandard;
 // We allocate in 1MB chunks.
 const unsigned gamepak_buffer_blocksize = 1024*1024;
 
@@ -437,10 +445,20 @@ u8 read_backup(u32 address)
     {
       /* ID manufacturer type */
       if(address == 0x0000)
-        value = FLASH_MANUFACTURER_MACRONIX;
+      {
+        if (flash_device_id == FLASH_DEVICE_SANYO_128KB)
+          value = FLASH_MANUFACTURER_SANYO;
+        else
+          value = FLASH_MANUFACTURER_MACRONIX;
+      }
       /* ID device type */
       else if(address == 0x0001)
-        value = FLASH_DEVICE_MACRONIX_128KB;
+      {
+        if (flash_device_id == FLASH_DEVICE_SANYO_128KB)
+          value = FLASH_DEVICE_SANYO_128KB;
+        else
+          value = FLASH_DEVICE_MACRONIX_128KB;
+      }
     }
     else
     {
@@ -1575,19 +1593,21 @@ typedef struct
 static void load_game_config_over(const char *gamecode)
 {
   unsigned i = 0;
+  is_known_game = false;
 
   for (i = 0; i < sizeof(gbaover)/sizeof(gbaover[0]); i++)
   {
-     if (strcmp(gbaover[i].gamepak_code, gamecode))
+     if (strcmp(gbaover[i].gamepak_code, gamecode) != 0)
         continue;
 
      printf("gamepak code match for : %s\n", gbaover[i].gamepak_code);
+     is_known_game = true;
 
      if (gbaover[i].idle_loop_target_pc != 0)
         idle_loop_target_pc = gbaover[i].idle_loop_target_pc;
 
      if (gbaover[i].flags & FLAGS_FLASH_128KB) {
-       flash_device_id = FLASH_DEVICE_MACRONIX_128KB;
+       flash_device_id = FLASH_DEVICE_SANYO_128KB;
        flash_bank_cnt = FLASH_SIZE_128KB;
      }
 
@@ -2181,8 +2201,14 @@ static u32 evict_gamepak_page(void)
 
 u8 *load_gamepak_page(u32 physical_index)
 {
-  if(physical_index >= (gamepak_size >> 15))
+  u32 rom_blocks = gamepak_size >> 15;
+  if (rom_blocks == 0)
     return &gamepak_buffers[0][0];
+
+  // Mirror accesses that land outside the physical ROM size.
+  // Classic NES/Famicom Mini titles rely on this behavior extensively.
+  if (physical_index >= rom_blocks)
+    physical_index %= rom_blocks;
 
   u32 entry = evict_gamepak_page();
   u32 block_idx = entry / 32;
@@ -2192,11 +2218,19 @@ u8 *load_gamepak_page(u32 physical_index)
   // Fill in the entry
   gamepak_blk_queue[entry].phy_rom = physical_index;
 
-  filestream_seek(gamepak_file_large, physical_index * (32 * 1024), SEEK_SET);
-  filestream_read(gamepak_file_large, swap_location, (32 * 1024));
+  u32 file_index = physical_index;
+  if (gamepak_mirror_1m && gamepak_file_blocks != 0)
+    file_index %= gamepak_file_blocks;
+
+  filestream_seek(gamepak_file_large, file_index * (32 * 1024), SEEK_SET);
+  {
+    u32 read_len = (u32)filestream_read(gamepak_file_large, swap_location, (32 * 1024));
+    if (read_len < (32 * 1024))
+      memset(swap_location + read_len, 0xFF, (32 * 1024) - read_len);
+  }
 
   // Map it to the read handlers now
-  map_rom_entry(read, physical_index, swap_location, gamepak_size >> 15);
+  map_rom_entry(read, physical_index, swap_location, rom_blocks);
 
   // When mapping page 0, we might need to reflect the GPIO regs.
   if (physical_index == 0)
@@ -2231,6 +2265,9 @@ void init_gamepak_buffer(void)
 
 bool gamepak_must_swap(void)
 {
+  if (gamepak_mini_materialized)
+    return false;
+
   // Returns whether the current gamepak buffer is not big enough to hold
   // the full gamepak ROM. In these cases the device must swap.
   return gamepak_buffer_count * gamepak_buffer_blocksize < gamepak_size;
@@ -2311,6 +2348,13 @@ void memory_term(void)
   {
     free(gamepak_buffers[--gamepak_buffer_count]);
   }
+
+  if (gamepak_mini_rom)
+  {
+    free(gamepak_mini_rom);
+    gamepak_mini_rom = NULL;
+  }
+  gamepak_mini_materialized = false;
 }
 
 bool memory_check_savestate(const u8 *src)
@@ -2496,16 +2540,61 @@ unsigned memory_write_savestate(u8 *dst)
 static s32 load_gamepak_raw(const char *name)
 {
   unsigned i, j;
+  u32 raw_size;
   gamepak_file_large = filestream_open(name, RETRO_VFS_FILE_ACCESS_READ,
                                        RETRO_VFS_FILE_ACCESS_HINT_NONE);
   if(gamepak_file_large)
   {
+    if (gamepak_mini_rom)
+    {
+      free(gamepak_mini_rom);
+      gamepak_mini_rom = NULL;
+    }
+    gamepak_mini_materialized = false;
+
     // Round size to 32KB pages
-    gamepak_size = (u32)filestream_get_size(gamepak_file_large);
-    gamepak_size = (gamepak_size + 0x7FFF) & ~0x7FFF;
+    raw_size = (u32)filestream_get_size(gamepak_file_large);
+    raw_size = (raw_size + 0x7FFF) & ~0x7FFF;
+    gamepak_file_blocks = raw_size >> 15;
+    gamepak_mirror_1m = (raw_size == 0x00100000);
+    gamepak_size = gamepak_mirror_1m ? 0x00400000 : raw_size;
+
+    // mGBA/VBA-M style path for 1MiB mirrored mini ROMs:
+    // materialize a dedicated 4MiB ROM image and map it directly.
+    if (gamepak_mirror_1m)
+    {
+      u32 map_blocks = gamepak_size >> 15;
+      u32 phyn;
+      gamepak_mini_rom = (u8*)malloc(gamepak_size);
+      if (gamepak_mini_rom)
+      {
+        u32 read_len = (u32)filestream_read(gamepak_file_large, gamepak_mini_rom, raw_size);
+        if (read_len < raw_size)
+          memset(gamepak_mini_rom + read_len, 0xFF, raw_size - read_len);
+        memcpy(gamepak_mini_rom + 0x100000, gamepak_mini_rom, 0x100000);
+        memcpy(gamepak_mini_rom + 0x200000, gamepak_mini_rom, 0x100000);
+        memcpy(gamepak_mini_rom + 0x300000, gamepak_mini_rom, 0x100000);
+
+        // Keep buffer[0] in sync with ROM start for header-based logic.
+        if (gamepak_buffer_count > 0)
+          memcpy(gamepak_buffers[0], gamepak_mini_rom, gamepak_buffer_blocksize);
+
+        map_null(read, 0x8000000, 0xD000000);
+        for (phyn = 0; phyn < map_blocks; phyn++)
+        {
+          u8 *blkptr = &gamepak_mini_rom[32 * 1024 * phyn];
+          map_rom_entry(read, phyn, blkptr, map_blocks);
+        }
+        update_gpio_romregs();
+
+        gamepak_mirror_1m = false;
+        gamepak_mini_materialized = true;
+        return 0;
+      }
+    }
 
     // Load stuff in 1MB chunks
-    u32 buf_blocks = (gamepak_size + gamepak_buffer_blocksize-1) / (gamepak_buffer_blocksize);
+    u32 buf_blocks = (raw_size + gamepak_buffer_blocksize-1) / (gamepak_buffer_blocksize);
     u32 rom_blocks = gamepak_size >> 15;
     u32 ldblks = buf_blocks < gamepak_buffer_count ?
                     buf_blocks : gamepak_buffer_count;
@@ -2517,8 +2606,12 @@ static s32 load_gamepak_raw(const char *name)
     for (i = 0; i < ldblks; i++)
     {
       // Load 1MB chunk and map it
-      filestream_read(gamepak_file_large, gamepak_buffers[i], gamepak_buffer_blocksize);
-      for (j = 0; j < 32 && i*32 + j < rom_blocks; j++)
+      {
+        u32 read_len = (u32)filestream_read(gamepak_file_large, gamepak_buffers[i], gamepak_buffer_blocksize);
+        if (read_len < gamepak_buffer_blocksize)
+          memset(gamepak_buffers[i] + read_len, 0xFF, gamepak_buffer_blocksize - read_len);
+      }
+      for (j = 0; j < 32 && i*32 + j < gamepak_file_blocks; j++)
       {
         u32 phyn = i*32 + j;
         u8* blkptr = &gamepak_buffers[i][32 * 1024 * j];
@@ -2535,6 +2628,169 @@ static s32 load_gamepak_raw(const char *name)
   return -1;
 }
 
+static bool rom_has_signature(const u8 *rom, u32 rom_size, const char *sig)
+{
+  u32 i;
+  u32 sig_len = (u32)strlen(sig);
+  if (rom_size < sig_len)
+    return false;
+
+  for (i = 0; i + sig_len <= rom_size; i++)
+  {
+    if (memcmp(&rom[i], sig, sig_len) == 0)
+      return true;
+  }
+
+  return false;
+}
+
+enum
+{
+  ROM_SIG_EEPROM  = (1 << 0),
+  ROM_SIG_SRAM    = (1 << 1),
+  ROM_SIG_FLASH1M = (1 << 2),
+  ROM_SIG_FLASH5  = (1 << 3)
+};
+
+static u32 rom_scan_signatures_in_memory(void)
+{
+  u32 found = 0;
+  u32 size_left = gamepak_size;
+  u32 buf_idx = 0;
+
+  const char *sig_eeprom = "EEPROM_V";
+  const char *sig_sram = "SRAM_V";
+  const char *sig_flash1m = "FLASH1M_V";
+  const char *sig_flash512 = "FLASH512_V";
+  const char *sig_flash = "FLASH_V";
+
+  while (size_left > 0 && buf_idx < gamepak_buffer_count)
+  {
+    u32 chunk_size = (size_left > gamepak_buffer_blocksize) ? gamepak_buffer_blocksize : size_left;
+    u8 *chunk = gamepak_buffers[buf_idx];
+
+    for (u32 i = 0; i < chunk_size - 10; i += 4)
+    {
+      if (chunk[i] == 'E' && !(found & ROM_SIG_EEPROM) && memcmp(&chunk[i], sig_eeprom, 8) == 0) found |= ROM_SIG_EEPROM;
+      else if (chunk[i] == 'S' && !(found & ROM_SIG_SRAM) && memcmp(&chunk[i], sig_sram, 6) == 0) found |= ROM_SIG_SRAM;
+      else if (chunk[i] == 'F' && !(found & ROM_SIG_FLASH1M) && memcmp(&chunk[i], sig_flash1m, 9) == 0) found |= ROM_SIG_FLASH1M;
+      else if (chunk[i] == 'F' && !(found & ROM_SIG_FLASH5)) {
+        if (memcmp(&chunk[i], sig_flash512, 10) == 0 || memcmp(&chunk[i], sig_flash, 7) == 0)
+          found |= ROM_SIG_FLASH5;
+      }
+    }
+
+    if ((found & (ROM_SIG_EEPROM | ROM_SIG_SRAM | ROM_SIG_FLASH1M | ROM_SIG_FLASH5)) ==
+        (ROM_SIG_EEPROM | ROM_SIG_SRAM | ROM_SIG_FLASH1M | ROM_SIG_FLASH5))
+      break;
+
+    size_left -= chunk_size;
+    buf_idx++;
+  }
+
+  return found;
+}
+
+static bool rom_is_pokemon_family(const u8 *rom)
+{
+  if (memcmp(&rom[0xA0], "POKEMON", 7) == 0)
+    return true;
+
+  if (memcmp(&rom[0xAC], "AXV", 3) == 0 ||  /* Ruby */
+      memcmp(&rom[0xAC], "AXP", 3) == 0 ||  /* Sapphire */
+      memcmp(&rom[0xAC], "BPE", 3) == 0 ||  /* Emerald */
+      memcmp(&rom[0xAC], "BPR", 3) == 0 ||  /* FireRed */
+      memcmp(&rom[0xAC], "BPG", 3) == 0)    /* LeafGreen */
+    return true;
+	
+  return false;
+}
+
+static void normalize_blank_backup_for_detected_type(void)
+{
+  u32 i;
+  u32 size = 0;
+  bool all_zero = true;
+
+  if (backup_type_reset == BACKUP_FLASH)
+    size = (flash_bank_cnt == FLASH_SIZE_128KB) ? (128 * 1024) : (64 * 1024);
+  else if (backup_type_reset == BACKUP_EEPROM)
+    size = 8 * 1024;
+  else if (backup_type_reset == BACKUP_SRAM)
+    size = 32 * 1024;
+
+  if (!size)
+    return;
+
+  for (i = 0; i < size; i++)
+  {
+    if (gamepak_backup[i] != 0x00)
+    {
+      all_zero = false;
+      break;
+    }
+  }
+
+  // Some frontends create blank save files filled with 0x00.
+  // Real flash/EEPROM idle state is 0xFF; normalize it for first boot.
+  if (all_zero)
+    memset(gamepak_backup, 0xFF, size);
+}
+
+static void detect_backup_subcircuit(const u8 *rom, u32 rom_size)
+{
+  bool has_eeprom = rom_has_signature(rom, rom_size, "EEPROM_V");
+  bool has_sram = rom_has_signature(rom, rom_size, "SRAM_V");
+  bool has_flash1m = rom_has_signature(rom, rom_size, "FLASH1M_V");
+  bool has_flash5 = rom_has_signature(rom, rom_size, "FLASH512_V") ||
+                    rom_has_signature(rom, rom_size, "FLASH_V");
+  u32 file_sigs = 0;
+
+  if (!has_eeprom && !has_sram && !has_flash1m && !has_flash5 &&
+      rom_is_pokemon_family(rom))
+  {
+    backup_type_reset = BACKUP_FLASH;
+    flash_bank_cnt = FLASH_SIZE_128KB;
+    flash_device_id = FLASH_DEVICE_SANYO_128KB;
+    return;
+  }
+
+  if (!has_eeprom && !has_sram && !has_flash1m && !has_flash5)
+    file_sigs = rom_scan_signatures_in_memory();
+
+  if (has_eeprom ||
+      (file_sigs & ROM_SIG_EEPROM))
+  {
+    backup_type_reset = BACKUP_EEPROM;
+    return;
+  }
+
+  if (has_sram ||
+      (file_sigs & ROM_SIG_SRAM))
+  {
+    backup_type_reset = BACKUP_SRAM;
+    return;
+  }
+
+  if (has_flash1m ||
+      (file_sigs & ROM_SIG_FLASH1M))
+  {
+    backup_type_reset = BACKUP_FLASH;
+    flash_bank_cnt = FLASH_SIZE_128KB;
+    flash_device_id = FLASH_DEVICE_SANYO_128KB;
+    return;
+  }
+
+  if (has_flash5 ||
+      (file_sigs & ROM_SIG_FLASH5))
+  {
+    backup_type_reset = BACKUP_FLASH;
+    flash_bank_cnt = FLASH_SIZE_64KB;
+    flash_device_id = FLASH_DEVICE_MACRONIX_64KB;
+    return;
+  }
+}
+
 u32 load_gamepak(const struct retro_game_info* info, const char *name,
                  int force_rtc, int force_rumble, int force_serial)
 {
@@ -2543,8 +2799,30 @@ u32 load_gamepak(const struct retro_game_info* info, const char *name,
    if (load_gamepak_raw(name))
       return -1;
 
-   // Buffer 0 always has the first 1MB chunk of the ROM
-   memcpy(game_code,  &gamepak_buffers[0][0xAC],  4);
+   gamepak_header_nonstandard =
+      (gamepak_buffers[0][3] != 0xEA) || (gamepak_buffers[0][0xB2] != 0x96);
+
+   /* Buffer 0 always has the first 1MB chunk of the ROM.
+    * Read game code regardless of header validity: ROM hacks usually
+    * preserve the code at 0xAC even when other header bytes are wrong. */
+   memcpy(game_code, &gamepak_buffers[0][0xAC], 4);
+
+   /* Sanitise game code: if all bytes are non-alphanumeric
+    * (homebrews, some NSP-extracted ROMs), use "UNKN" so
+    * load_game_config_over gets a consistent string to compare. */
+   {
+      int ci;
+      bool code_valid = false;
+      for (ci = 0; ci < 4; ci++) {
+         unsigned char c = (unsigned char)game_code[ci];
+         if ((c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9')) {
+            code_valid = true;
+            break;
+         }
+      }
+      if (!code_valid)
+         memcpy(game_code, "UNKN", 4);
+   }
 
    idle_loop_target_pc = 0xFFFFFFFF;
    translation_gate_targets = 0;
@@ -2557,7 +2835,73 @@ u32 load_gamepak(const struct retro_game_info* info, const char *name,
 
    load_game_config_over(game_code);
 
-   // Forced RTC / Rumble modes, override the autodetect logic.
+   if (backup_type_reset == BACKUP_UNKN)
+   {
+      u32 scan_size = gamepak_size < (1024*1024) ? gamepak_size : (1024*1024);
+      detect_backup_subcircuit(gamepak_buffers[0], scan_size);
+   }
+
+   bool is_128k_flash = (backup_type_reset == BACKUP_FLASH && flash_bank_cnt == FLASH_SIZE_128KB);
+   bool is_pokemon_engine = rom_is_pokemon_family(gamepak_buffers[0]) || is_128k_flash;
+
+   require_m1_hle_bios = false;
+   
+   bool title_altered = false;
+   bool is_expanded = (gamepak_size > 16777216);
+   
+   if (rom_is_pokemon_family(gamepak_buffers[0]))
+   {
+      char title[13];
+      memcpy(title, &gamepak_buffers[0][0xA0], 12);
+      title[12] = '\0';
+      
+      if (strncmp(title, "POKEMON FIRE", 12) != 0 &&
+          strncmp(title, "POKEMON LEAF", 12) != 0 &&
+          strncmp(title, "POKEMON EMER", 12) != 0 &&
+          strncmp(title, "POKEMON RUBY", 12) != 0 &&
+          strncmp(title, "POKEMON SAPP", 12) != 0)
+      {
+         title_altered = true;
+      }
+   }
+
+   bool is_hack = gamepak_header_nonstandard || !is_known_game || title_altered || (is_expanded && is_pokemon_engine);
+
+   if (is_hack && is_pokemon_engine)
+   {
+      backup_type_reset = BACKUP_FLASH;
+      flash_bank_cnt = FLASH_SIZE_128KB;
+      flash_device_id = FLASH_DEVICE_SANYO_128KB;
+      rtc_enabled = true;
+      require_m1_hle_bios = true;
+      
+      if (force_serial == SERIAL_MODE_AUTO)
+         serial_mode = SERIAL_MODE_SERIAL_POKE;
+   }
+   else if (!is_hack && rom_is_pokemon_family(gamepak_buffers[0]))
+   {
+      if (flash_bank_cnt == FLASH_SIZE_128KB)
+         rtc_enabled = true;
+
+      if (force_serial == SERIAL_MODE_AUTO)
+      {
+         if (strncmp(game_code, "AXV", 3) == 0 || strncmp(game_code, "AXP", 3) == 0)
+         {
+            serial_mode = SERIAL_MODE_SERIAL_POKE;
+         }
+         else
+         {
+            serial_mode = SERIAL_MODE_RFU;
+         }
+      }
+   }
+	
+   normalize_blank_backup_for_detected_type();
+
+   backup_type = backup_type_reset;
+   flash_mode = FLASH_BASE_MODE;
+   flash_bank_num = 0;
+
    if (force_rtc != FEAT_AUTODETECT)
       rtc_enabled = (force_rtc == FEAT_ENABLE);
    if (force_rumble != FEAT_AUTODETECT)
@@ -2578,5 +2922,3 @@ s32 load_bios(char *name)
   filestream_close(fd);
   return 0;
 }
-
-

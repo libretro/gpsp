@@ -30,6 +30,8 @@ unsigned turbo_a_counter   = 0;
 unsigned turbo_b_counter   = 0;
 
 static u32 old_key = 0;
+static u32 gbp_keypad_frames = 0;
+static bool gbp_keypad_sent = false;
 static retro_input_state_t input_state_cb;
 
 void retro_set_input_state(retro_input_state_t cb) { input_state_cb = cb; }
@@ -123,13 +125,35 @@ u32 update_input(void)
    else
       turbo_b_counter = 0;
 
-   // GBP keypad detection hack (only at game startup!)
-   if (serial_mode == SERIAL_MODE_GBP) {
-     // During the startup screen (aproximate)
-     if (frame_counter > 20 && frame_counter < 100) {
-       // Emulate 4 keypad buttons pressed (which is impossible).
-       new_key = (frame_counter % 3) ? 0x3FF : 0x30F;
-     }
+   // GBP keypad detection hack (only once when game ROM starts running).
+   // This must work with both boot-to-ROM and boot-to-BIOS flows.
+   if (frame_counter == 0)
+   {
+      gbp_keypad_frames = 0;
+      gbp_keypad_sent = false;
+   }
+
+   if (serial_mode == SERIAL_MODE_GBP)
+   {
+      bool game_rom_running = reg[REG_PC] >= 0x08000000 && reg[REG_PC] < 0x0E000000;
+
+      if (!gbp_keypad_sent && game_rom_running)
+      {
+         gbp_keypad_frames = 96;
+         gbp_keypad_sent = true;
+      }
+
+      if (gbp_keypad_frames > 0)
+      {
+         // Emulate 4 keypad buttons pressed (which is impossible).
+         new_key = (gbp_keypad_frames & 1) ? 0x3FF : 0x30F;
+         gbp_keypad_frames--;
+      }
+   }
+   else
+   {
+      gbp_keypad_frames = 0;
+      gbp_keypad_sent = false;
    }
 
    if ((new_key | old_key) != old_key)
@@ -170,5 +194,4 @@ unsigned input_write_savestate(u8 *dst)
   bson_finish_document(dst, wbptr1);
   return (unsigned int)(dst - startp);
 }
-
 

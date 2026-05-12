@@ -301,6 +301,7 @@ u32 function_cc update_gba(int remaining_cycles)
 
 void reset_gba(void)
 {
+  gbp_reset();
   init_memory();
   init_main();
   init_cpu();
@@ -421,5 +422,4 @@ unsigned main_write_savestate(u8* dst)
 
   return (unsigned int)(dst - startp);
 }
-
 
