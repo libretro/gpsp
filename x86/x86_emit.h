@@ -371,48 +371,6 @@ typedef enum
   x86_emit_byte(x86_opcode_call_offset);                                      \
   x86_emit_dword(relative_offset)                                             \
 
-/* Win64 ABI requires the caller to reserve 32 bytes of "shadow space" on
- * the stack before a call, into which the callee may spill its incoming
- * register arguments (rcx, rdx, r8, r9).  Without it, the callee's spill
- * stores land on top of whatever lives below the JIT block's return
- * address - in execute_arm_translate_internal's frame that area holds
- * the SAVE_REGISTERS-saved rbp/rdi/rsi/rbx.  Those then come back wrong
- * from REST_REGISTERS and corrupt RetroArch's runloop_iterate state on
- * return (most visibly: rbp, which the host C compiler may pin to a
- * struct base across the retro_run call boundary).  The crash is
- * release-only (debug builds use the interpreter) and amplified by
- * fast-forward (more JIT entries per wall-clock second).
- *
- * We emit a 40-byte adjustment, not 32: rsp is misaligned by 8 inside
- * execute_arm_translate_internal (entry ret addr + 4*8 callee-saved
- * pushes leave it at X-40, i.e. 16-byte-aligned + 8).  At a JIT call
- * site we further want rsp to be 16-byte-aligned + 8 right before the
- * call instruction itself so the callee sees a 16-aligned stack.
- * sub $40, %rsp from X-40 lands at X-80 (16-aligned), the call pushes
- * 8 to land at X-88 -> callee entry sees 16-aligned + 8, as the ABI
- * requires.  32 alone would leave the callee misaligned and the
- * compiler's SSE spills in the prologue would fault on the first
- * aligned movaps. */
-#if defined(_WIN64)
-  #define x86_emit_winabi_shadow_alloc()                                       \
-  {                                                                           \
-    x86_emit_byte(0x48);   /* REX.W */                                        \
-    x86_emit_byte(0x83);   /* sub r/m64, imm8 */                              \
-    x86_emit_byte(0xEC);   /* /5, rm=rsp */                                   \
-    x86_emit_byte(0x28);   /* 40 */                                           \
-  }
-  #define x86_emit_winabi_shadow_free()                                        \
-  {                                                                           \
-    x86_emit_byte(0x48);                                                      \
-    x86_emit_byte(0x83);   /* add r/m64, imm8 */                              \
-    x86_emit_byte(0xC4);   /* /0, rm=rsp */                                   \
-    x86_emit_byte(0x28);                                                      \
-  }
-#else
-  #define x86_emit_winabi_shadow_alloc()
-  #define x86_emit_winabi_shadow_free()
-#endif
-
 #define x86_emit_ret()                                                        \
   x86_emit_byte(x86_opcode_ret)                                               \
 
@@ -608,10 +566,60 @@ typedef enum
 
 
 #define generate_function_call(function_location)                             \
-  x86_emit_winabi_shadow_alloc();                                             \
   x86_emit_call_offset(x86_relative_offset(translation_ptr,                   \
    function_location, 4));                                                    \
-  x86_emit_winabi_shadow_free();                                              \
+
+/* Variant of generate_function_call for callees that follow the C ABI.
+ * The earlier 'wrap every generate_function_call with Win64 shadow space'
+ * fix turned out to be wrong on two counts:
+ *
+ *   1. Several generate_function_call targets are NOT C functions, they
+ *      are hand-written asm stubs in x86_stub.S (x86_update_gba, the
+ *      execute_load_* / execute_store_* family, execute_store_cpsr).
+ *      Those stubs have no compiler-emitted argument-spill prologue, so
+ *      they do not need shadow space.  Worse, they have non-local-return
+ *      paths (jne lookup_pc / js return_to_main inside x86_update_gba)
+ *      that tail-jump out of the stub without ever returning to the JIT
+ *      block's 'add $40, %rsp' cleanup, leaking the shadow allocation
+ *      and corrupting downstream stack discipline.  They also already
+ *      bracket their own internal C calls via CALL_FUNC which keeps the
+ *      ABI alignment correct from the unwrapped JIT entry point - adding
+ *      shadow space at the JIT->stub boundary throws off the alignment
+ *      seen by the stub's inner CALL_FUNC and faults inside the C
+ *      helper.
+ *
+ *   2. generate_branch_no_cycle_update has a hardcoded 'jns +10' that
+ *      skips exactly 'mov $imm32, %eax; call x86_update_gba' (5 + 5
+ *      bytes).  Wrapping that call grew the region to 18 bytes and the
+ *      branch then landed inside the call's disp32, executing garbage
+ *      on the not-taken path - the visible startup crash.
+ *
+ * Split the macro: keep generate_function_call as a bare call (used for
+ * asm-stub targets), and introduce generate_c_function_call which adds
+ * the Win64 shadow allocation for real C-function targets only.
+ *
+ * 0x28 (40) bytes, not 0x20 (32): the JIT is entered with %rsp mod 16
+ * == 8.  An adjustment of 40 brings %rsp to mod 16 == 0 so the call's
+ * own 8-byte push lands the callee at mod 16 == 8 as Win64 requires.
+ * 32 alone would leave the callee misaligned and any 16-byte SSE spill
+ * (movaps, which gcc emits freely at -O2) would fault. */
+#if defined(_WIN64)
+  #define generate_c_function_call(function_location)                          \
+    x86_emit_byte(0x48);                       /* REX.W                   */   \
+    x86_emit_byte(0x83);                       /* sub r/m64, imm8         */   \
+    x86_emit_byte(0xEC);                       /* /5, rm=rsp              */   \
+    x86_emit_byte(0x28);                       /* imm8 = 40               */   \
+    x86_emit_call_offset(x86_relative_offset(translation_ptr,                  \
+     function_location, 4));                                                   \
+    x86_emit_byte(0x48);                                                       \
+    x86_emit_byte(0x83);                       /* add r/m64, imm8         */   \
+    x86_emit_byte(0xC4);                       /* /0, rm=rsp              */   \
+    x86_emit_byte(0x28);                                                       \
+
+#else
+  #define generate_c_function_call(function_location)                          \
+    generate_function_call(function_location)
+#endif
 
 #define generate_exit_block()                                                 \
   x86_emit_ret();                                                             \
@@ -712,7 +720,7 @@ typedef enum
   #define emit_trace_instruction(pc, mode)         \
     x86_emit_mov_reg_imm(reg_arg0, pc);            \
     x86_emit_mov_reg_imm(reg_arg1, mode);          \
-    generate_function_call(trace_instruction);
+    generate_c_function_call(trace_instruction);
   #define emit_trace_arm_instruction(pc)           \
     emit_trace_instruction(pc, 1)
   #define emit_trace_thumb_instruction(pc)         \
@@ -1114,7 +1122,7 @@ u32 function_cc execute_spsr_restore(u32 address)
   if(reg_index == 15)                                                         \
   {                                                                           \
     generate_mov(arg0, ireg);                                                 \
-    generate_function_call(execute_spsr_restore);                             \
+    generate_c_function_call(execute_spsr_restore);                           \
     generate_indirect_branch_dual();                                          \
   }                                                                           \
 
@@ -2212,7 +2220,7 @@ static void function_cc execute_swi(u32 pc)
 #define arm_swi()                                                             \
   collapse_flags(a0, a1);                                                     \
   generate_load_pc(arg0, (pc + 4));                                           \
-  generate_function_call(execute_swi);                                        \
+  generate_c_function_call(execute_swi);                                      \
   generate_branch()                                                           \
 
 #define thumb_b()                                                             \
@@ -2248,15 +2256,15 @@ static void function_cc execute_swi(u32 pc)
 }                                                                             \
 
 #define thumb_process_cheats()                                                \
-  generate_function_call(process_cheats);
+  generate_c_function_call(process_cheats);
 
 #define arm_process_cheats()                                                  \
-  generate_function_call(process_cheats);
+  generate_c_function_call(process_cheats);
 
 #define thumb_swi()                                                           \
   collapse_flags(a0, a1);                                                     \
   generate_load_pc(arg0, (pc + 2));                                           \
-  generate_function_call(execute_swi);                                        \
+  generate_c_function_call(execute_swi);                                      \
   generate_branch_cycle_update(                                               \
    block_exits[block_exit_position].branch_source,                            \
    block_exits[block_exit_position].branch_target);                           \
