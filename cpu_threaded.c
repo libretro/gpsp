@@ -284,7 +284,7 @@ void translate_icache_sync() {
 
 #define translate_arm_instruction()                                           \
   check_pc_region(pc);                                                        \
-  opcode = address32(pc_address_block, (pc & 0x7FFF));                        \
+  opcode = readaddress32(pc_address_block, (pc & 0x7FFF));                    \
   condition = block_data[block_data_position].condition;                      \
                                                                               \
   if((condition != last_condition) || (condition >= 0x20))                    \
@@ -1747,7 +1747,7 @@ void translate_icache_sync() {
   flag_status = block_data[block_data_position].flag_data;                    \
   check_pc_region(pc);                                                        \
   last_opcode = opcode;                                                       \
-  opcode = address16(pc_address_block, (pc & 0x7FFF));                        \
+  opcode = readaddress16(pc_address_block, (pc & 0x7FFF));                    \
   emit_trace_thumb_instruction(pc);                                           \
   u8 hiop = opcode >> 8;                                                      \
                                                                               \
@@ -1957,7 +1957,7 @@ void translate_icache_sync() {
         u32 aoff = (pc & ~2) + (imm*4) + 4;                                   \
         /* ROM + same page -> optimize as const load */                       \
         if (!ram_region && (((aoff + 4) >> 15) == (pc >> 15))) {              \
-          u32 value = address32(pc_address_block, (aoff & 0x7FFF));           \
+          u32 value = readaddress32(pc_address_block, (aoff & 0x7FFF));       \
           thumb_load_pc_pool_const(rdreg, value);                             \
         } else {                                                              \
           thumb_access_memory(load, imm, rdreg, 0, 0, pc_relative, aoff, u32);\
@@ -2707,7 +2707,7 @@ u8 function_cc *block_lookup_address_thumb(u32 pc)
   (condition == 0x0E)                                                         \
 
 #define arm_load_opcode()                                                     \
-  opcode = address32(pc_address_block, (block_end_pc & 0x7FFF));              \
+  opcode = readaddress32(pc_address_block, (block_end_pc & 0x7FFF));          \
   condition = opcode >> 28;                                                   \
                                                                               \
   opcode &= 0xFFFFFFF;                                                        \
@@ -2807,7 +2807,7 @@ u8 function_cc *block_lookup_address_thumb(u32 pc)
 
 #define thumb_load_opcode()                                                   \
   last_opcode = opcode;                                                       \
-  opcode = address16(pc_address_block, (block_end_pc & 0x7FFF));              \
+  opcode = readaddress16(pc_address_block, (block_end_pc & 0x7FFF));          \
                                                                               \
   block_end_pc += 2                                                           \
 
