@@ -870,8 +870,17 @@ void rfu_net_receive(const void* buf, size_t len, uint16_t client_id) {
 // Account for consumed cycles and return if a serial IRQ should be raised.
 bool rfu_update(unsigned cycles) {
   if (rfu_comstate == RFU_COMSTATE_WAITEVENT) {
-    // Force receive packets so that we can perhaps abort the wait
-    // This helps minimize latency (otherwise we need to wait a full frame!)
+    /* Force receive packets so that we can perhaps abort the wait.
+     * This helps minimize latency (otherwise we need to wait a full
+     * frame!).
+     *
+     * REENTRANCY: netpacket_poll_receive synchronously dispatches to
+     * the frontend's netplay code, which may then call back into our
+     * netpacket_receive -> rfu_net_receive on the same thread.
+     * rfu_net_receive freely mutates rfu_state, rfu_host, rfu_client,
+     * rfu_peer_bcst[] and other rfu_* globals.  All reads below must
+     * re-fetch these globals after this point - do NOT cache rfu_state
+     * etc. into a local across this call. */
     netpacket_poll_receive();
 
     // Check if we are running our of time to respond.

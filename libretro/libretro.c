@@ -211,86 +211,71 @@ static void init_frameskip(void)
 
 static void video_post_process_cc(void)
 {
-   uint16_t *src = gba_screen_pixels;
-   uint16_t *dst = gba_processed_pixels;
-   size_t x, y;
+   const uint16_t *src = gba_screen_pixels;
+   uint16_t       *dst = gba_processed_pixels;
+   const size_t    npx = GBA_SCREEN_HEIGHT * GBA_SCREEN_PITCH;
+   size_t i;
 
-   for (y = 0; y < GBA_SCREEN_HEIGHT; y++)
+   for (i = 0; i < npx; i++)
    {
-      for (x = 0; x < GBA_SCREEN_PITCH; x++)
-      {
-         u16 src_color = *(src + x);
+      uint16_t src_color = src[i];
 
-         /* Convert colour to RGB555 and perform lookup */
-         *(dst + x) = *(gba_cc_lut + (((src_color & 0xFFC0) >> 1) | (src_color & 0x1F)));
-      }
-
-      src += GBA_SCREEN_PITCH;
-      dst += GBA_SCREEN_PITCH;
+      /* Convert colour to RGB555 and perform lookup */
+      dst[i] = gba_cc_lut[((src_color & 0xFFC0) >> 1) | (src_color & 0x1F)];
    }
 }
 
 static void video_post_process_mix(void)
 {
-   uint16_t *src_curr = gba_screen_pixels;
-   uint16_t *src_prev = gba_screen_pixels_prev;
-   uint16_t *dst      = gba_processed_pixels;
-   size_t x, y;
+   /* Flat loop: pitch equals width so the row-stride bookkeeping in
+    * the original two-level form was bookkeeping for no actual stride
+    * mismatch.  Compilers can vectorize the flat loop more aggressively;
+    * on ARM Cortex-A it makes a measurable difference at -O2.  The
+    * per-pixel snapshot of src_curr into src_prev has been hoisted out
+    * to a single memcpy after the loop - SIMD-vectorized by libc and
+    * eliminates the interleaved scalar stores. */
+   const uint16_t *src_curr = gba_screen_pixels;
+   const uint16_t *src_prev = gba_screen_pixels_prev;
+   uint16_t       *dst      = gba_processed_pixels;
+   const size_t    npx      = GBA_SCREEN_HEIGHT * GBA_SCREEN_PITCH;
+   size_t i;
 
-   for (y = 0; y < GBA_SCREEN_HEIGHT; y++)
+   for (i = 0; i < npx; i++)
    {
-      for (x = 0; x < GBA_SCREEN_PITCH; x++)
-      {
-         /* Get colours from current + previous frames (RGB565) */
-         uint16_t rgb_curr = *(src_curr + x);
-         uint16_t rgb_prev = *(src_prev + x);
+      uint16_t rgb_curr = src_curr[i];
+      uint16_t rgb_prev = src_prev[i];
 
-         /* Store colours for next frame */
-         *(src_prev + x)   = rgb_curr;
-
-         /* Mix colours
-          * > "Mixing Packed RGB Pixels Efficiently"
-          *   http://blargg.8bitalley.com/info/rgb_mixing.html */
-         *(dst + x)        = (rgb_curr + rgb_prev + ((rgb_curr ^ rgb_prev) & 0x821)) >> 1;
-      }
-
-      src_curr += GBA_SCREEN_PITCH;
-      src_prev += GBA_SCREEN_PITCH;
-      dst      += GBA_SCREEN_PITCH;
+      /* Mix colours:
+       *   http://blargg.8bitalley.com/info/rgb_mixing.html */
+      dst[i] = (rgb_curr + rgb_prev + ((rgb_curr ^ rgb_prev) & 0x821)) >> 1;
    }
+
+   memcpy(gba_screen_pixels_prev, gba_screen_pixels, GBA_SCREEN_BUFFER_SIZE);
 }
 
 static void video_post_process_cc_mix(void)
 {
-   uint16_t *src_curr = gba_screen_pixels;
-   uint16_t *src_prev = gba_screen_pixels_prev;
-   uint16_t *dst      = gba_processed_pixels;
-   size_t x, y;
+   /* See video_post_process_mix for the loop-flatten + bulk-memcpy
+    * rationale.  Same shape, plus the gba_cc_lut colour-correction
+    * lookup on the mixed value. */
+   const uint16_t *src_curr = gba_screen_pixels;
+   const uint16_t *src_prev = gba_screen_pixels_prev;
+   uint16_t       *dst      = gba_processed_pixels;
+   const size_t    npx      = GBA_SCREEN_HEIGHT * GBA_SCREEN_PITCH;
+   size_t i;
 
-   for (y = 0; y < GBA_SCREEN_HEIGHT; y++)
+   for (i = 0; i < npx; i++)
    {
-      for (x = 0; x < GBA_SCREEN_PITCH; x++)
-      {
-         /* Get colours from current + previous frames (RGB565) */
-         uint16_t rgb_curr = *(src_curr + x);
-         uint16_t rgb_prev = *(src_prev + x);
+      uint16_t rgb_curr = src_curr[i];
+      uint16_t rgb_prev = src_prev[i];
 
-         /* Store colours for next frame */
-         *(src_prev + x)   = rgb_curr;
+      uint16_t rgb_mix  = (rgb_curr + rgb_prev + ((rgb_curr ^ rgb_prev) & 0x821)) >> 1;
 
-         /* Mix colours
-          * > "Mixing Packed RGB Pixels Efficiently"
-          *   http://blargg.8bitalley.com/info/rgb_mixing.html */
-         uint16_t rgb_mix  = (rgb_curr + rgb_prev + ((rgb_curr ^ rgb_prev) & 0x821)) >> 1;
-
-         /* Convert colour to RGB555 and perform lookup */
-         *(dst + x) = *(gba_cc_lut + (((rgb_mix & 0xFFC0) >> 1) | (rgb_mix & 0x1F)));
-      }
-
-      src_curr += GBA_SCREEN_PITCH;
-      src_prev += GBA_SCREEN_PITCH;
-      dst      += GBA_SCREEN_PITCH;
+      /* Convert colour to RGB555 and perform lookup */
+      dst[i] = gba_cc_lut[((rgb_mix & 0xFFC0) >> 1) | (rgb_mix & 0x1F)];
    }
+
+   memcpy(gba_screen_pixels_prev, gba_screen_pixels, GBA_SCREEN_BUFFER_SIZE);
 }
 
 static void init_post_processing(void)
@@ -318,25 +303,36 @@ static void init_post_processing(void)
       memset(gba_processed_pixels, 0xFFFF, GBA_SCREEN_BUFFER_SIZE);
    }
 
-   /* Initialise 'history' buffer, if required */
+   /* Initialise 'history' buffer, if required.  If this alloc fails we
+    * must NOT fall through to the mix-variant assignment below: those
+    * functions dereference gba_screen_pixels_prev unconditionally.
+    * Leave the user setting (post_process_mix) intact - the failure
+    * may be transient - but skip the function-pointer assignment for
+    * the mix path so video_run keeps working. */
    if (!gba_screen_pixels_prev &&
        post_process_mix)
    {
       gba_screen_pixels_prev = (u16*)malloc(GBA_SCREEN_BUFFER_SIZE);
 
-      if (!gba_screen_pixels_prev)
-         return;
-
-      memset(gba_screen_pixels_prev, 0xFFFF, GBA_SCREEN_BUFFER_SIZE);
+      if (!gba_screen_pixels_prev && log_cb)
+         log_cb(RETRO_LOG_WARN,
+                "Failed to allocate frame history buffer; disabling mix component of post-processing this run\n");
+      else if (gba_screen_pixels_prev)
+         memset(gba_screen_pixels_prev, 0xFFFF, GBA_SCREEN_BUFFER_SIZE);
    }
 
-   /* Assign post processing function */
-   if (post_process_cc && post_process_mix)
-      video_post_process = video_post_process_cc_mix;
-   else if (post_process_cc)
-      video_post_process = video_post_process_cc;
-   else if (post_process_mix)
-      video_post_process = video_post_process_mix;
+   /* Assign post processing function.  Treat post_process_mix as
+    * effectively false if the history buffer is missing. */
+   {
+      bool mix_active = post_process_mix && (gba_screen_pixels_prev != NULL);
+
+      if (post_process_cc && mix_active)
+         video_post_process = video_post_process_cc_mix;
+      else if (post_process_cc)
+         video_post_process = video_post_process_cc;
+      else if (mix_active)
+         video_post_process = video_post_process_mix;
+   }
 }
 
 /* Video post processing END */
@@ -371,6 +367,11 @@ static void audio_run(void)
    s16 *audio_buffer_ptr;
    u32 samples_to_read;
    u32 samples_produced;
+
+   /* If retro_init's malloc failed we still get called every frame;
+    * skip the work in that case rather than write through NULL. */
+   if (!audio_sample_buffer)
+      return;
 
    /* audio_samples_per_frame is decimal;
     * get integer component */
@@ -558,6 +559,17 @@ void retro_init(void)
    audio_samples_accumulator = 0.0f;
    audio_sample_buffer_size  = ((u32)audio_samples_per_frame + 1) * 2;
    audio_sample_buffer       = (s16*)malloc(audio_sample_buffer_size * sizeof(s16));
+   if (!audio_sample_buffer)
+   {
+      if (log_cb)
+         log_cb(RETRO_LOG_ERROR,
+                "Failed to allocate audio sample buffer (%u bytes)\n",
+                (unsigned)(audio_sample_buffer_size * sizeof(s16)));
+      /* Continue: audio_run() now guards against this NULL and the
+       * frontend just runs silent.  Better than failing retro_init
+       * outright on memory-constrained targets where a small audio
+       * allocation may fail but the rest of the core still works. */
+   }
 
 #if defined(HAVE_DYNAREC)
   #if defined(MMAP_JIT_CACHE)
@@ -622,6 +634,16 @@ void retro_init(void)
 #else
       gba_screen_pixels = (uint16_t*)malloc(GBA_SCREEN_BUFFER_SIZE);
 #endif
+
+   /* gba_screen_pixels is dereferenced unconditionally by both the
+    * renderer (writes from update_scanline) and the post-process /
+    * video_cb hand-off in video_run.  A NULL here means we cannot
+    * safely run a single frame.  Log loudly; load_game will return
+    * the failure to the frontend so the core unloads cleanly. */
+   if (!gba_screen_pixels && log_cb)
+      log_cb(RETRO_LOG_ERROR,
+             "Failed to allocate frame buffer (%u bytes); core will refuse to load content\n",
+             (unsigned)GBA_SCREEN_BUFFER_SIZE);
 
    libretro_supports_bitmasks = false;
    if (environ_cb(RETRO_ENVIRONMENT_GET_INPUT_BITMASKS, NULL))
@@ -1087,6 +1109,13 @@ static void set_memory_descriptors(void)
 bool retro_load_game(const struct retro_game_info* info)
 {
    if (!info || !info->path)
+      return false;
+
+   /* If retro_init failed to allocate the frame buffer, refuse to load
+    * rather than crash on the first video_run.  retro_init is allowed
+    * to fail allocations silently; this is the point at which we have
+    * to decide whether the core can usefully run. */
+   if (!gba_screen_pixels)
       return false;
 
    check_variables(true);
