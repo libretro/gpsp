@@ -2682,6 +2682,8 @@ static void emit_phand(
 //    and possible operand size and misaligment (+sign extensions)
 void init_emitter(bool must_swap) {
   int i;
+  /* must_swap is unused on MIPS (see x86_emit.h for context). */
+  (void)must_swap;
   // Initialize memory to a debuggable state
   rom_cache_watermark = INITIAL_ROM_WATERMARK;
 

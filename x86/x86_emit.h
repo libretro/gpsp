@@ -2264,6 +2264,13 @@ extern void* x86_table_data[9][16];
 extern void* x86_table_info[9][16];
 
 void init_emitter(bool must_swap) {
+  /* must_swap is intentionally unused on the x86 backend.  The flag
+   * signals "ROM is too large to fit in resident buffers; reads may need
+   * to page in via load_gamepak_page" - it's the ARM backend that selects
+   * a different load-handler dispatch table for the paged case.  On x86
+   * the regular load handlers already handle paged reads correctly, so
+   * no per-flag specialization is needed here. */
+  (void)must_swap;
   memcpy(x86_table_info, x86_table_data, sizeof(x86_table_data));
 
   rom_cache_watermark = INITIAL_ROM_WATERMARK;
