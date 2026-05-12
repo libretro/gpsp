@@ -82,6 +82,11 @@ bool bson_read_int32_array(const u8 *srcp, const char *key, u32* value, unsigned
     if (arrsz < 5)
       return false;
     arrsz = (arrsz - 5) >> 3;
+    /* Trust the caller's requested count rather than the on-disk array
+     * size: a crafted savestate could otherwise overflow the destination
+     * buffer by claiming a larger array than the caller allocated. */
+    if (arrsz != cnt)
+      return false;
     while (arrsz--) {
       p += 4;   // type and name
       *value++ = bson_read_u32(p);
@@ -89,7 +94,6 @@ bool bson_read_int32_array(const u8 *srcp, const char *key, u32* value, unsigned
     }
     return true;
   }
-  *value = bson_read_u32(p);
   return false;
 }
 

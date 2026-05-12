@@ -36,8 +36,8 @@
 }
 
 #define bson_read_u32(p)                        \
-  ((p[3] << 24) | (p[2] << 16) |                \
-   (p[1] <<  8) | (p[0] <<  0))
+  (((u32)(p)[3] << 24) | ((u32)(p)[2] << 16) |  \
+   ((u32)(p)[1] <<  8) | ((u32)(p)[0] <<  0))
 
 #define bson_write_cstring(p, value)            \
   memcpy(p, value, strlen(value)+1);            \
