@@ -2541,6 +2541,7 @@ static s32 load_gamepak_raw(const char *name)
 {
   unsigned i, j;
   u32 raw_size;
+  int64_t fsize;
   gamepak_file_large = filestream_open(name, RETRO_VFS_FILE_ACCESS_READ,
                                        RETRO_VFS_FILE_ACCESS_HINT_NONE);
   if(gamepak_file_large)
@@ -2552,8 +2553,20 @@ static s32 load_gamepak_raw(const char *name)
     }
     gamepak_mini_materialized = false;
 
+    /* filestream_get_size() returns int64_t and can yield a negative
+     * value on error or a value above 4 GiB. Silently casting either to
+     * u32 produces a wrong raw_size that downstream code happily uses to
+     * malloc, memset and map. Reject both cases up front. */
+    fsize = filestream_get_size(gamepak_file_large);
+    if (fsize <= 0 || fsize > (int64_t)0x20000000)   /* > 512MiB: not a GBA ROM */
+    {
+      filestream_close(gamepak_file_large);
+      gamepak_file_large = NULL;
+      return -1;
+    }
+    raw_size = (u32)fsize;
+
     // Round size to 32KB pages
-    raw_size = (u32)filestream_get_size(gamepak_file_large);
     raw_size = (raw_size + 0x7FFF) & ~0x7FFF;
     gamepak_file_blocks = raw_size >> 15;
     gamepak_mirror_1m = (raw_size == 0x00100000);
@@ -2591,6 +2604,19 @@ static s32 load_gamepak_raw(const char *name)
         gamepak_mini_materialized = true;
         return 0;
       }
+
+      /* Materialization failed (malloc returned NULL).  Fall back to the
+       * chunked path, but undo the gamepak_size = 4MiB lie: the chunked
+       * loader keys mapping off gamepak_file_blocks (= 32 for a 1 MiB
+       * file) and rom_blocks (= gamepak_size >> 15).  Leaving
+       * gamepak_size at 4 MiB tells map_rom_entry to map 128 pages even
+       * though we only have 32, producing wrong addresses for the
+       * mirrored upper 3 MiB.  Reset to the on-disk size and disable the
+       * mirror flag; the game will see only the first 1 MiB, but at
+       * least the mapping is consistent and the core does not crash. */
+      gamepak_size = raw_size;
+      gamepak_mirror_1m = false;
+      filestream_seek(gamepak_file_large, 0, SEEK_SET);
     }
 
     // Load stuff in 1MB chunks
