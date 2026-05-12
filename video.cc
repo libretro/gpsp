@@ -486,10 +486,12 @@ static void render_scanline_text_mosaic(u32 layer,
 
   // Iterate pixel by pixel, loading data every N pixels to honor mosaic effect
   u8 pval = 0;
+  u32 mctr = 0;
   for (u32 i = 0; start < end; start++, i++, dest_ptr++) {
     u16 tile = eswap16(*map_ptr);
 
-    if (!(i % mosh)) {
+    // Counter-based mosaic (see render_affine_background for rationale).
+    if (!mctr) {
       const u8 *tile_ptr = &tile_base[(tile & 0x3FF) * (is8bpp ? 64 : 32)];
 
       bool hflip = (tile & 0x400);
@@ -508,7 +510,9 @@ static void render_scanline_text_mosaic(u32 layer,
         else
           pval = (tile_ptr[(hoffset % 8) >> 1] >> ((hoffset & 1) * 4)) & 0xF;
       }
+      mctr = mosh;
     }
+    mctr--;
 
     if (is8bpp) {
       if (pval) {
@@ -660,15 +664,23 @@ static inline void render_affine_background(
   if (wrap) {
     // In wrap mode the entire space is covered, since it "wraps" at the edges
     u8 pval = 0;
+    u32 mctr = 0;
     if (rotate) {
       for (u32 i = 0; cnt; i++, cnt--) {
         u32 pix_x = (u32)(source_x >> 8) & (width_height-1);
         u32 pix_y = (u32)(source_y >> 8) & (width_height-1);
 
-        // Lookup pixel and draw it (only every Nth if mosaic is on)
-        if (!mosaic || !(i % mosh))
+        // Lookup pixel and draw it (only every Nth if mosaic is on).  The
+        // counter form avoids a divl per pixel: mosh is loop-invariant but
+        // runtime-valued, so gcc/clang do not strength-reduce 'i % mosh'
+        // into a multiply-by-magic-constant sequence.  When mosaic == false
+        // the counter machinery is dead-code-eliminated at compile time.
+        if (!mosaic || !mctr) {
           pval = lookup_pix_8bpp(pix_x, pix_y, tile_base, map_base, map_size);
+          mctr = mosh;
+        }
         rend_pix_8bpp<dtype, rdtype, isbase>(dst_ptr++, pval, bg_comb, px_comb, pal);
+        if (mosaic) mctr--;
 
         source_x += dx; source_y += dy;  // Move to the next pixel
       }
@@ -677,9 +689,12 @@ static inline void render_affine_background(
       const u32 pix_y = (u32)(source_y >> 8) & (width_height-1);
       for (u32 i = 0; cnt; i++, cnt--) {
         u32 pix_x = (u32)(source_x >> 8) & (width_height-1);
-        if (!mosaic || !(i % mosh))
+        if (!mosaic || !mctr) {
           pval = lookup_pix_8bpp(pix_x, pix_y, tile_base, map_base, map_size);
+          mctr = mosh;
+        }
         rend_pix_8bpp<dtype, rdtype, isbase>(dst_ptr++, pval, bg_comb, px_comb, pal);
+        if (mosaic) mctr--;
         source_x += dx;  // Only moving in the X direction.
       }
     }
@@ -706,6 +721,7 @@ static inline void render_affine_background(
 
       // Draw background pixels by looking them up in the map
       u8 pval = 0;
+      u32 mctr = 0;
       for (u32 i = 0; cnt; i++, cnt--) {
         u32 pix_x = (u32)(source_x >> 8), pix_y = (u32)(source_y >> 8);
 
@@ -714,9 +730,12 @@ static inline void render_affine_background(
           break;
 
         // Lookup pixel and draw it.
-        if (!mosaic || !(i % mosh))
+        if (!mosaic || !mctr) {
           pval = lookup_pix_8bpp(pix_x, pix_y, tile_base, map_base, map_size);
+          mctr = mosh;
+        }
         rend_pix_8bpp<dtype, rdtype, isbase>(dst_ptr++, pval, bg_comb, px_comb, pal);
+        if (mosaic) mctr--;
 
         // Move to the next pixel, update coords accordingly
         source_x += dx; source_y += dy;
@@ -740,14 +759,18 @@ static inline void render_affine_background(
           cnt--;
         }
         // Draw actual background
+        u32 mctr = 0;
         for (u32 i = 0; cnt; i++, cnt--) {
           u32 pix_x = (u32)(source_x >> 8);
           if (pix_x >= width_height)
             break;
 
-          if (!mosaic || !(i % mosh))
+          if (!mosaic || !mctr) {
             pval = lookup_pix_8bpp(pix_x, pix_y, tile_base, map_base, map_size);
+            mctr = mosh;
+          }
           rend_pix_8bpp<dtype, rdtype, isbase>(dst_ptr++, pval, bg_comb, px_comb, pal);
+          if (mosaic) mctr--;
 
           source_x += dx;
         }
@@ -879,11 +902,15 @@ static inline void render_scanline_bitmap(
     u32 pixcnt = MIN(end - start, width - pixel_x);
     pixfmt *valptr = &src_ptr[pixel_x + (pixel_y * width)];
     pixfmt val = 0;
+    u32 mctr = 0;
     for (u32 i = 0; pixcnt; i++, pixcnt--, valptr++) {
-      // Pretty much pixel copier
-      if (!mosaic || !(i % mosh))
+      // Pretty much pixel copier (counter-based mosaic: see render_affine_background)
+      if (!mosaic || !mctr) {
         val = sizeof(pixfmt) == 2 ? eswap16(*valptr) : *valptr;
+        mctr = mosh;
+      }
       bitmap_pixel_write<rdtype, dsttype, mode, pixfmt>(dst_ptr++, val, palptr, px_attr);
+      if (mosaic) mctr--;
     }
   }
   else if (rdmode == SCALED) {
@@ -902,17 +929,20 @@ static inline void render_scanline_bitmap(
 
     u32 cnt = end - start;
     pixfmt val = 0;
+    u32 mctr = 0;
     for (u32 i = 0; cnt; i++, cnt--) {
       u32 pixel_x = (u32)(source_x >> 8);
       if (pixel_x >= width)
         break;  // We reached the end of the bitmap
 
-      if (!mosaic || !(i % mosh)) {
+      if (!mosaic || !mctr) {
         pixfmt *valptr = &src_ptr[pixel_x + (pixel_y * width)];
         val = sizeof(pixfmt) == 2 ? eswap16(*valptr) : *valptr;
+        mctr = mosh;
       }
 
       bitmap_pixel_write<rdtype, dsttype, mode, pixfmt>(dst_ptr++, val, palptr, px_attr);
+      if (mosaic) mctr--;
       source_x += dx;
     }
   } else {
@@ -935,6 +965,14 @@ static inline void render_scanline_bitmap(
         break;
 
       // Lookup pixel and draw it.
+      // NOTE: 'i' is declared but never incremented in this branch
+      // (pre-existing).  i % mosh is therefore constant-propagated to
+      // 0 % mosh == 0 and !(i % mosh) is always true at runtime; gcc
+      // elides the divide entirely.  Left as-is - the counter-based
+      // rewrite applied to the other mosaic sites is unnecessary here
+      // and would mask the latent bug that 'i' never advances.  Any
+      // fix to the mosaic semantics belongs in a separate correctness
+      // patch with reference-renderer comparison.
       if (!mosaic || !(i % mosh)) {
         pixfmt *valptr = &src_ptr[pixel_x + (pixel_y * width)];
         val = sizeof(pixfmt) == 2 ? eswap16(*valptr) : *valptr;
@@ -1161,8 +1199,10 @@ static void render_object_mosaic(
   u32 px_attr = px_comb | palette | 0x100;  // Combine flags + high palette bit
 
   u8 pval = 0;
+  u32 mctr = 0;
   for (u32 i = 0; i < cnt; i++, offx++, dst_ptr++) {
-    if (!(i % mosh)) {
+    // Counter-based mosaic (see render_affine_background for rationale).
+    if (!mctr) {
       // Load tile pixel color.
       u32 tile_offset = base_tile_offset + (offx / 8) * tile_size_off;
       const u8* tile_ptr = &vram[0x10000 + (tile_offset & 0x7FFF)];
@@ -1179,7 +1219,9 @@ static void render_object_mosaic(
         else
           pval = (tile_ptr[(offx % 8) >> 1] >> ((offx & 1) * 4)) & 0xF;
       }
+      mctr = mosh;
     }
+    mctr--;
 
     // Write the pixel value as required
     const u16 *subpal = &pal[palette];
@@ -1269,6 +1311,7 @@ static void render_affine_object(
 
   // Draw sprite pixels by looking them up first. Lookup address is tricky!
   u8 pixval = 0;
+  u32 mctr = 0;
   for (u32 i = 0; i < cnt; i++) {
     u32 pixel_x = (u32)(source_x >> 8), pixel_y = (u32)(source_y >> 8);
 
@@ -1276,8 +1319,9 @@ static void render_affine_object(
     if (pixel_x >= obj_dimw || pixel_y >= obj_dimh)
       return;
 
-    // For mosaic, we "remember" the last looked up pixel.
-    if (!mosaic || !(i % mosh)) {
+    // For mosaic, we "remember" the last looked up pixel.  Counter form
+    // avoids a per-pixel divl (see render_affine_background).
+    if (!mosaic || !mctr) {
       // Lookup pixel and draw it.
       if (is8bpp) {
         // We lookup the byte directly and render it.
@@ -1300,7 +1344,9 @@ static void render_affine_object(
         u8 pixpair = vram[0x10000 + (tile_off & 0x7FFF)]; // Read 2 pixels @4bpp
         pixval = ((pixel_x & 1) ? pixpair >> 4 : pixpair & 0xF);
       }
+      mctr = mosh;
     }
+    if (mosaic) mctr--;
 
     // Render the pixel value
     if (pixval) {
@@ -1624,6 +1670,20 @@ static void order_layers(u32 layer_flags, u32 vcnt)
   bool obj_enabled = (layer_flags & 0x10);
   s32 priority;
 
+  // Pre-fetch the 4 layer priorities once instead of reading io_registers
+  // four times per priority (16 reads -> 4 reads per scanline).  The
+  // compiler can't CSE the read across the outer loop because io_registers
+  // is global and could in principle be modified by JIT-translated code
+  // between iterations; that doesn't actually happen here (we are inside
+  // update_scanline which runs to completion before returning to the JIT),
+  // but stating it explicitly costs nothing.
+  const u32 layer_prio[4] = {
+    (u32)(read_ioreg(REG_BGxCNT(0)) & 0x03),
+    (u32)(read_ioreg(REG_BGxCNT(1)) & 0x03),
+    (u32)(read_ioreg(REG_BGxCNT(2)) & 0x03),
+    (u32)(read_ioreg(REG_BGxCNT(3)) & 0x03),
+  };
+
   layer_count = 0;
 
   for(priority = 3; priority >= 0; priority--)
@@ -1634,7 +1694,7 @@ static void order_layers(u32 layer_flags, u32 vcnt)
     for(lnum = 3; lnum >= 0; lnum--)
     {
       if(((layer_flags >> lnum) & 1) &&
-         ((read_ioreg(REG_BGxCNT(lnum)) & 0x03) == priority))
+         (layer_prio[lnum] == (u32)priority))
       {
         layer_order[layer_count++] = lnum;
       }
