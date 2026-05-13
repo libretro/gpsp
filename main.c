@@ -262,7 +262,10 @@ u32 function_cc update_gba(int remaining_cycles)
 
     // Figure out when we need to stop CPU execution. The next event is
     // a video event or a timer event, whatever happens first.
-    execute_cycles = MAX(video_count, 0);
+    
+    // Set this low to increase frequency we check for interrupts during the scanline 
+    // but sync with video count once we get equal or below 96 cycles remaining
+    execute_cycles = MIN(video_count, 96);
     {
       u32 cc = serial_next_event();
       execute_cycles = MIN(execute_cycles, cc);
