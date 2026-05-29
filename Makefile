@@ -59,7 +59,13 @@ else ifneq ($(findstring MINGW,$(shell uname -a)),)
 endif
 
 ifneq (,$(findstring webos,$(CROSS_COMPILE)))
-	CPU_ARCH := arm
+	ifneq (,$(findstring aarch64,$(CROSS_COMPILE)))
+		CPU_ARCH := arm64
+		HAVE_DYNAREC := 1
+		MMAP_JIT_CACHE = 1
+	else
+		CPU_ARCH := arm
+	endif
 endif
 
 TARGET_NAME	:= gpsp
