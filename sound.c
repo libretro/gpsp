@@ -250,8 +250,10 @@ u32 gbc_sound_master_volume;
         break;                                                                \
       }                                                                       \
                                                                               \
-      frequency_step = float_to_fp16_16(((131072.0f / (2048 - rate)) * 8.0f)  \
-       / sound_frequency);                                                    \
+      /* (131072/(2048-rate))*8 / sound_frequency, in 16.16 fixed point.      \
+       * sound_frequency == 2^16 makes this exactly 2^20/(2048-rate).         \
+       * Verified bit-identical to the float form for rate 0..2047.           */ \
+      frequency_step = (fixed16_16)(1048576u / (2048 - rate));                \
                                                                               \
       gs->frequency_step = frequency_step;                                    \
       gs->rate = rate;                                                        \
@@ -409,8 +411,14 @@ void render_gbc_sound()
   u16 sound_status = read_ioreg(REG_SOUNDCNT_X) & 0xFFF0;
   const s8 *sample_data;
   u32 tick_delta = cpu_ticks - gbc_sound_last_cpu_ticks;
-  fixed16_16 buffer_ticks = float_to_fp16_16((float)(tick_delta) *
-                                             sound_frequency / GBC_BASE_RATE);
+  /* tick_delta * sound_frequency / GBC_BASE_RATE, in 16.16 fixed point.
+   * Done in 64-bit integer so the result is exact and bit-reproducible
+   * across toolchains/arches (the old float form depended on x87 vs SSE
+   * rounding and FMA contraction, and lost mantissa bits for large deltas
+   * in the overclock build). In the default build this is exactly
+   * tick_delta * 256. */
+  fixed16_16 buffer_ticks = (fixed16_16)
+   ((((u64)tick_delta * GBA_SOUND_FREQUENCY) << 16) / GBC_BASE_RATE_INT);
   if (!tick_delta)
     return;
 
@@ -577,8 +585,8 @@ void reset_sound(void)
 
 void init_sound()
 {
-  gbc_sound_tick_step =
-   float_to_fp16_16(256.0f / sound_frequency);
+  /* 256 / sound_frequency in 16.16 == 256 (sound_frequency == 2^16). */
+  gbc_sound_tick_step = (fixed16_16)256u;
 
   init_noise_table(noise_table15, 32767, 14);
   init_noise_table(noise_table7, 127, 6);

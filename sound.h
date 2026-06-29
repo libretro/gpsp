@@ -27,8 +27,13 @@
 
 #ifdef OVERCLOCK_60FPS
   #define GBC_BASE_RATE ((float)(60 * 228 * (272+960)))
+  /* Integer companion used by the deterministic audio path. Keeping the
+   * float form above for the frontend timing field / RTC / rumble, which
+   * legitimately want float results. */
+  #define GBC_BASE_RATE_INT ((u32)(60 * 228 * (272+960)))
 #else
   #define GBC_BASE_RATE ((float)(16 * 1024 * 1024))
+  #define GBC_BASE_RATE_INT ((u32)(16 * 1024 * 1024))
 #endif
 
 #define DIRECT_SOUND_INACTIVE         0

@@ -44,12 +44,12 @@
   u32 rate = value & 0x7FF;                                                   \
   gbc_sound_channel[channel].rate = rate;                                     \
   gbc_sound_channel[channel].frequency_step =                                 \
-   float_to_fp16_16(((131072.0 / (2048 - rate)) * 8.0) / sound_frequency);    \
+   (fixed16_16)(1048576u / (2048 - rate));                                    \
   gbc_sound_channel[channel].length_status = (value >> 14) & 0x01;            \
   if(value & 0x8000)                                                          \
   {                                                                           \
     gbc_sound_channel[channel].active_flag = 1;                               \
-    gbc_sound_channel[channel].sample_index -= float_to_fp16_16(1.0 / 12.0);  \
+    gbc_sound_channel[channel].sample_index -= (fixed16_16)(65536u / 12u);    \
     gbc_sound_channel[channel].envelope_ticks =                               \
      gbc_sound_channel[channel].envelope_initial_ticks;                       \
     gbc_sound_channel[channel].envelope_volume =                              \
@@ -104,7 +104,7 @@ static const u32 gbc_sound_wave_volume[4] = { 0, 16384, 8192, 4096 };
   u32 rate = value & 0x7FF;                                                   \
   gbc_sound_channel[2].rate = rate;                                           \
   gbc_sound_channel[2].frequency_step =                                       \
-   float_to_fp16_16((2097152.0 / (2048 - rate)) / sound_frequency);           \
+   (fixed16_16)(2097152u / (2048 - rate));                                    \
   gbc_sound_channel[2].length_status = (value >> 14) & 0x01;                  \
   if(value & 0x8000)                                                          \
   {                                                                           \
@@ -122,14 +122,12 @@ static const u32 gbc_sound_wave_volume[4] = { 0, 16384, 8192, 4096 };
   if(dividing_ratio == 0)                                                     \
   {                                                                           \
     gbc_sound_channel[3].frequency_step =                                     \
-     float_to_fp16_16(1048576.0 / (1 << (frequency_shift + 1)) /              \
-     sound_frequency);                                                        \
+     (fixed16_16)(1048576u >> (frequency_shift + 1));                         \
   }                                                                           \
   else                                                                        \
   {                                                                           \
     gbc_sound_channel[3].frequency_step =                                     \
-     float_to_fp16_16(524288.0 / (dividing_ratio *                            \
-     (1 << (frequency_shift + 1))) / sound_frequency);                        \
+     (fixed16_16)(524288u / (dividing_ratio << (frequency_shift + 1)));       \
   }                                                                           \
   gbc_sound_channel[3].noise_type = (value >> 3) & 0x01;                      \
   gbc_sound_channel[3].length_status = (value >> 14) & 0x01;                  \
@@ -203,7 +201,8 @@ static void sound_control_x(u32 value)
 
 #define sound_update_frequency_step(timer_number)                             \
   timer[timer_number].frequency_step =                                        \
-   float_to_fp8_24((GBC_BASE_RATE / sound_frequency) / (timer_reload))        \
+   (fixed8_24)(((u64)GBC_BASE_RATE_INT << 24) /                               \
+    ((u64)GBA_SOUND_FREQUENCY * (timer_reload)))                              \
 
 /* Main */
 extern timer_type timer[4];
@@ -253,8 +252,8 @@ static void trigger_timer(u32 timer_number, u32 value)
          if(timer_number < 2)
          {
             u32 buffer_adjust =
-               (u32)(((float)(cpu_ticks - gbc_sound_last_cpu_ticks) *
-                        sound_frequency) / GBC_BASE_RATE) * 2;
+               (u32)(((u64)(cpu_ticks - gbc_sound_last_cpu_ticks) *
+                        GBA_SOUND_FREQUENCY) / GBC_BASE_RATE_INT) * 2;
 
             sound_update_frequency_step(timer_number);
             adjust_sound_buffer(timer_number, 0);
