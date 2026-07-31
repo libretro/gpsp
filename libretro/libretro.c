@@ -944,6 +944,18 @@ static void check_variables(bool started_from_load)
    dynarec_enable = 0;
 #endif
 
+   var.key = "gpsp_rtc_time_source";
+   var.value = NULL;
+   {
+      rtc_time_source_type source = RTC_TIME_SOURCE_DETERMINISTIC;
+
+      if (environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &var) && var.value &&
+          !strcmp(var.value, "system"))
+         source = RTC_TIME_SOURCE_SYSTEM;
+
+      rtc_set_time_source(source);
+   }
+
    if (started_from_load) {
      var.key                = "gpsp_bios";
      var.value              = 0;
