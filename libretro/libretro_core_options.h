@@ -101,6 +101,17 @@ struct retro_core_option_definition option_defs_us[] = {
       "disabled"
    },
    {
+      "gpsp_oam_hijack",
+      "OAM Priority Hijacking",
+      "Support for OAM priority hijacking behavior where objects relative BG priority does not follow the normal OAM order priority. The GBA has a transparency bug in these situations which is used by some games (Golden Sun, Golden Sun 2, Zelda: Minish Cap, Mario Golf etc), this option emulates that bug.",
+      {
+         { "disabled", NULL },
+         { "enabled",  NULL },
+         { NULL, NULL },
+      },
+      "disabled"
+   },
+   {
       "gpsp_rtc",
       "RTC support",
       "Sets the RTC support for the emulated cartridge. Autodetect uses a ROM database that works with most commercial titles. You might need to force RTC when using homebrew or ROM hacks.",
