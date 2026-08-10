@@ -73,6 +73,7 @@ typedef struct
 typedef enum
 {
   REG_DISPCNT = 0x00,
+  REG_GRNSWP = 0x01,
   REG_DISPSTAT = 0x02,
   REG_VCOUNT = 0x03,
   REG_BG0CNT = 0x04,
