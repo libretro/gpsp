@@ -40,8 +40,11 @@
   #endif
 #endif
 
+/* Masking the left shift count keeps a rotate by zero well defined: a
+   shift by 32 is undefined behavior in C, and rotate counts here are
+   always in the 0..31 range so the masked form is equivalent. */
 #define ror(dest, value, shift)                                               \
-  dest = ((value) >> (shift)) | ((value) << (32 - (shift)))                   \
+  dest = ((value) >> (shift)) | ((value) << ((32 - (shift)) & 0x1F))          \
 
 #define MAX(a,b)  ((a) > (b) ? (a) : (b))
 #define MIN(a,b)  ((a) < (b) ? (a) : (b))
