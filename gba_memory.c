@@ -613,24 +613,59 @@ void function_cc write_eeprom(u32 unused_address, u32 value)
 #define unmapped_rom_read32(addr)                                             \
   ((((addr) & ~3) >> 1) & 0xFFFF) | (((((addr) & ~3) + 2) >> 1) << 16)
 
+/* Open bus reads return the last prefetched opcode, emulated below as a
+   PC-relative read. If the CPU is itself executing from open bus, that
+   PC-relative read resolves to the very same open bus handler with the
+   same address, recursing without bound and overflowing the host stack.
+   Detect a prefetch address that would itself land on open bus and fall
+   back to the latched bus value instead of recursing. */
+#define fetch_is_open_bus(a)                                                  \
+  ((((a) >> 24) > 0x0F) || (((a) >> 24) == 0x01) ||                           \
+   ((((a) >> 24) == 0x00) && ((a) >= 0x4000)))
+
 #define read_open8()                                                          \
-  if(!(reg[REG_CPSR] & 0x20))                                                 \
-    value = read_memory8(reg[REG_PC] + 8 + (address & 0x03));                 \
-  else                                                                        \
-    value = read_memory8(reg[REG_PC] + 4 + (address & 0x01))                  \
+  {                                                                           \
+    u32 fetch_addr;                                                           \
+    if(!(reg[REG_CPSR] & 0x20))                                               \
+      fetch_addr = reg[REG_PC] + 8 + (address & 0x03);                        \
+    else                                                                      \
+      fetch_addr = reg[REG_PC] + 4 + (address & 0x01);                        \
+    if(fetch_is_open_bus(fetch_addr))                                         \
+      value = (u8)(reg[REG_BUS_VALUE] >> ((address & 0x03) << 3));            \
+    else                                                                      \
+      value = read_memory8(fetch_addr);                                       \
+  }                                                                           \
 
 #define read_open16()                                                         \
-  if(!(reg[REG_CPSR] & 0x20))                                                 \
-    value = read_memory16(reg[REG_PC] + 8 + (address & 0x02));                \
-  else                                                                        \
-    value = read_memory16(reg[REG_PC] + 4)                                    \
+  {                                                                           \
+    u32 fetch_addr;                                                           \
+    if(!(reg[REG_CPSR] & 0x20))                                               \
+      fetch_addr = reg[REG_PC] + 8 + (address & 0x02);                        \
+    else                                                                      \
+      fetch_addr = reg[REG_PC] + 4;                                           \
+    if(fetch_is_open_bus(fetch_addr))                                         \
+      value = (u16)(reg[REG_BUS_VALUE] >> ((address & 0x02) << 3));           \
+    else                                                                      \
+      value = read_memory16(fetch_addr);                                      \
+  }                                                                           \
 
 #define read_open32()                                                         \
   if(!(reg[REG_CPSR] & 0x20))                                                 \
-    value = read_memory32(reg[REG_PC] + 8);                                   \
+  {                                                                           \
+    u32 fetch_addr = reg[REG_PC] + 8;                                         \
+    if(fetch_is_open_bus(fetch_addr))                                         \
+      value = reg[REG_BUS_VALUE];                                             \
+    else                                                                      \
+      value = read_memory32(fetch_addr);                                      \
+  }                                                                           \
   else                                                                        \
   {                                                                           \
-    u32 current_instruction = read_memory16(reg[REG_PC] + 4);                 \
+    u32 fetch_addr = reg[REG_PC] + 4;                                         \
+    u32 current_instruction;                                                  \
+    if(fetch_is_open_bus(fetch_addr))                                         \
+      current_instruction = (u16)reg[REG_BUS_VALUE];                          \
+    else                                                                      \
+      current_instruction = read_memory16(fetch_addr);                        \
     value = current_instruction | (current_instruction << 16);                \
   }                                                                           \
 
