@@ -113,6 +113,17 @@ struct retro_core_option_definition option_defs_us[] = {
       "auto"
    },
    {
+      "gpsp_rtc_time_source",
+      "RTC Time Source",
+      "Selects the clock used by RTC-enabled cartridges. Deterministic advances with emulated frames and is preserved in save states. System Clock follows the host clock, including time elapsed while content is not running.",
+      {
+         { "deterministic", "Deterministic" },
+         { "system",        "System Clock" },
+         { NULL, NULL },
+      },
+      "deterministic"
+   },
+   {
       "gpsp_serial",
       "Link Cable Connectivity",
       "Configures the serial (Link Cable) connection. Automatic will pick up a reasonable support for most known games.",

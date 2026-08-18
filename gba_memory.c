@@ -1300,6 +1300,15 @@ s32 rtc_bit_count;
  * rate, which would rewind the in-game clock every few minutes.
  * frame_counter wraps after ~2.27 years of continuous emulation. */
 static s64 rtc_base_time = 0;
+static rtc_time_source_type rtc_time_source = RTC_TIME_SOURCE_DETERMINISTIC;
+
+void rtc_set_time_source(rtc_time_source_type source)
+{
+  if (source != RTC_TIME_SOURCE_SYSTEM)
+    source = RTC_TIME_SOURCE_DETERMINISTIC;
+
+  rtc_time_source = source;
+}
 
 /* Cycles per frame at the native rate; same divisor at the 60FPS
  * overclock since GBC_BASE_RATE scales correspondingly. */
@@ -1315,6 +1324,9 @@ static void rtc_init_base_time(void)
 
 static time_t rtc_current_time(void)
 {
+  if (rtc_time_source == RTC_TIME_SOURCE_SYSTEM)
+    return time(NULL);
+
   return (time_t)(rtc_base_time +
                   (s64)((double)frame_counter * GBA_FRAME_SECONDS));
 }

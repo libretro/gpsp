@@ -26,6 +26,12 @@
 #define FEAT_DISABLE      0
 #define FEAT_ENABLE       1
 
+typedef enum rtc_time_source_type
+{
+  RTC_TIME_SOURCE_DETERMINISTIC = 0,
+  RTC_TIME_SOURCE_SYSTEM
+} rtc_time_source_type;
+
 #define DMA_CHAN_CNT   4
 
 #define DMA_START_IMMEDIATELY         0
@@ -252,6 +258,7 @@ u32 load_gamepak(const struct retro_game_info* info, const char *name,
 s32 load_bios(char *name);
 void init_memory(void);
 void init_gamepak_buffer(void);
+void rtc_set_time_source(rtc_time_source_type source);
 bool gamepak_must_swap(void);
 void memory_term(void);
 u8 *load_gamepak_page(u32 physical_index);
