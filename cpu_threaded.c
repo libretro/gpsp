@@ -161,7 +161,7 @@ typedef struct
   u32 reg_list = opcode & 0xFFFF                                              \
 
 #define arm_decode_branch()                                                   \
-  s32 offset = ((s32)(opcode & 0xFFFFFF) << 8) >> 6                           \
+  s32 offset = ((s32)((u32)(opcode << 8))) >> 6                               \
 
 #define thumb_decode_shift()                                                  \
   u32 imm = (opcode >> 6) & 0x1F;                                             \
@@ -2806,7 +2806,7 @@ u8 function_cc *block_lookup_address_thumb(u32 pc)
   block_end_pc += 4                                                           \
 
 #define arm_branch_target()                                                   \
-  branch_target = (block_end_pc + 4 + (((s32)(opcode & 0xFFFFFF) << 8) >> 6)) \
+  branch_target = (block_end_pc + 4 + (((s32)((u32)(opcode << 8))) >> 6))     \
 
 // Contiguous conditional block flags modification - it will set 0x20 in the
 // condition's bits if this instruction modifies flags. Taken from the CPU
