@@ -2528,6 +2528,85 @@ inline static ramtag_type* get_ram_tag(u16 tagval) {
   return &tbl[tgidx >> 1];  /* Since LSB is always 1 and thus unused */
 }
 
+/* External branch exits are resolved iteratively through this worklist
+   rather than by recursing from translate_block into block_lookup_translate
+   for every branch target. Long chains of not-yet-translated blocks would
+   otherwise nest one host stack frame pair per block and can overflow small
+   thread stacks (Android runs cores on a ~1MiB native thread). Entries are
+   queued while translating and drained by the outermost lookup, keeping the
+   host stack depth constant regardless of the guest branch graph. */
+
+typedef struct
+{
+  u8 *branch_source;
+  u32 branch_target;
+  u32 thumb;
+} deferred_exit_type;
+
+static deferred_exit_type *deferred_exits = NULL;
+static u32 deferred_exit_count = 0;
+static u32 deferred_exit_capacity = 0;
+static u32 translate_depth = 0;
+
+u8 function_cc *block_lookup_translate_arm(u32 pc);
+u8 function_cc *block_lookup_translate_thumb(u32 pc);
+
+static bool defer_external_exit(u8 *branch_source, u32 branch_target,
+ u32 thumb)
+{
+  if(deferred_exit_count == deferred_exit_capacity)
+  {
+    u32 new_capacity = deferred_exit_capacity ? deferred_exit_capacity * 2
+                                              : 128;
+    deferred_exit_type *new_exits = (deferred_exit_type *)realloc(
+     deferred_exits, new_capacity * sizeof(deferred_exit_type));
+    if(!new_exits)
+      return false;
+    deferred_exits = new_exits;
+    deferred_exit_capacity = new_capacity;
+  }
+
+  deferred_exits[deferred_exit_count].branch_source = branch_source;
+  deferred_exits[deferred_exit_count].branch_target = branch_target;
+  deferred_exits[deferred_exit_count].thumb = thumb;
+  deferred_exit_count++;
+  return true;
+}
+
+/* Runs at translate_depth == 1 so that the nested lookups it performs do
+   not drain recursively themselves; they only translate their block and
+   queue its exits. Entries must be popped before looking up their target
+   since the lookup can grow (and thus move) the worklist. */
+
+static bool process_deferred_exits(void)
+{
+  while(deferred_exit_count)
+  {
+    u8 *branch_source;
+    u32 branch_target;
+    u32 thumb;
+    u8 *translation_target;
+
+    deferred_exit_count--;
+    branch_source = deferred_exits[deferred_exit_count].branch_source;
+    branch_target = deferred_exits[deferred_exit_count].branch_target;
+    thumb         = deferred_exits[deferred_exit_count].thumb;
+
+    if(branch_target == 0x00000008)
+      translation_target = bios_swi_entrypoint;
+    else if(thumb)
+      translation_target = block_lookup_translate_thumb(branch_target);
+    else
+      translation_target = block_lookup_translate_arm(branch_target);
+
+    if(!translation_target)
+      return false;
+
+    generate_branch_patch_unconditional(branch_source, translation_target);
+  }
+  return true;
+}
+
 // This function will return a pointer to a translated block of code. If it
 // doesn't exist it will translate it, if it does it will pass it back.
 
@@ -2575,7 +2654,13 @@ u8 function_cc *block_lookup_translate_##type(u32 pc)                         \
         bool result;                                                          \
         u8 *blkptr = ram_translation_ptr + block_prologue_size;               \
         trentry->offset_##type = blkptr - ram_translation_cache;              \
+        translate_depth++;                                                    \
         result = translate_block_##type(pc, true);                            \
+        if (result && translate_depth == 1)                                   \
+          result = process_deferred_exits();                                  \
+        translate_depth--;                                                    \
+        if (!result && !translate_depth)                                      \
+          deferred_exit_count = 0;                                            \
                                                                               \
         if (result)                                                           \
           return blkptr;                                                      \
@@ -2615,7 +2700,13 @@ u8 function_cc *block_lookup_translate_##type(u32 pc)                         \
         *blk_offset_addr = (u32)(rom_translation_ptr - rom_translation_cache);\
         rom_translation_ptr += sizeof(hashhdr_type);                          \
         blkptr = rom_translation_ptr + block_prologue_size;                   \
+        translate_depth++;                                                    \
         result = translate_block_##type(pc, false);                           \
+        if (result && translate_depth == 1)                                   \
+          result = process_deferred_exits();                                  \
+        translate_depth--;                                                    \
+        if (!result && !translate_depth)                                      \
+          deferred_exit_count = 0;                                            \
                                                                               \
         if (result)                                                           \
           return blkptr;                                                      \
@@ -3020,7 +3111,6 @@ bool translate_block_arm(u32 pc, bool ram_region)
   u32 block_end_pc = pc;
   u32 block_exit_position = 0;
   s32 block_data_position = 0;
-  u32 external_block_exit_position = 0;
   u32 branch_target;
   u32 cycle_count = 0;
   u8 *translation_target;
@@ -3029,7 +3119,6 @@ bool translate_block_arm(u32 pc, bool ram_region)
   u8 *translation_cache_limit = NULL;
   s32 i;
   u32 flag_status;
-  block_exit_type external_block_exits[MAX_EXITS];
   generate_block_extra_vars_arm();
   arm_fix_pc();
 
@@ -3143,12 +3232,10 @@ bool translate_block_arm(u32 pc, bool ram_region)
     }
     else
     {
-      /* External branch, save for later */
-      external_block_exits[external_block_exit_position].branch_target =
-       branch_target;
-      external_block_exits[external_block_exit_position].branch_source =
-       block_exits[i].branch_source;
-      external_block_exit_position++;
+      /* External branch, queue for the outermost lookup to resolve */
+      if(!defer_external_exit(block_exits[i].branch_source,
+       branch_target, 0))
+        return false;
     }
   }
 
@@ -3157,18 +3244,6 @@ bool translate_block_arm(u32 pc, bool ram_region)
   else
     rom_translation_ptr = translation_ptr;
 
-  for(i = 0; i < external_block_exit_position; i++)
-  {
-    branch_target = external_block_exits[i].branch_target;
-    if(branch_target == 0x00000008)
-      translation_target = bios_swi_entrypoint;
-    else
-      translation_target = block_lookup_translate_arm(branch_target);
-    if (!translation_target)
-      return false;
-    generate_branch_patch_unconditional(
-      external_block_exits[i].branch_source, translation_target);
-  }
   return true;
 }
 
@@ -3184,7 +3259,6 @@ bool translate_block_thumb(u32 pc, bool ram_region)
   u32 block_end_pc = pc;
   u32 block_exit_position = 0;
   s32 block_data_position = 0;
-  u32 external_block_exit_position = 0;
   u32 branch_target;
   u32 cycle_count = 0;
   u8 *translation_target;
@@ -3193,7 +3267,6 @@ bool translate_block_thumb(u32 pc, bool ram_region)
   u8 *translation_cache_limit = NULL;
   s32 i;
   u32 flag_status;
-  block_exit_type external_block_exits[MAX_EXITS];
   generate_block_extra_vars_thumb();
   thumb_fix_pc();
 
@@ -3300,12 +3373,10 @@ bool translate_block_thumb(u32 pc, bool ram_region)
     }
     else
     {
-      /* External branch, save for later */
-      external_block_exits[external_block_exit_position].branch_target =
-       branch_target;
-      external_block_exits[external_block_exit_position].branch_source =
-       block_exits[i].branch_source;
-      external_block_exit_position++;
+      /* External branch, queue for the outermost lookup to resolve */
+      if(!defer_external_exit(block_exits[i].branch_source,
+       branch_target, 1))
+        return false;
     }
   }
 
@@ -3314,18 +3385,6 @@ bool translate_block_thumb(u32 pc, bool ram_region)
   else
     rom_translation_ptr = translation_ptr;
 
-  for(i = 0; i < external_block_exit_position; i++)
-  {
-    branch_target = external_block_exits[i].branch_target;
-    if(branch_target == 0x00000008)
-      translation_target = bios_swi_entrypoint;
-    else
-      translation_target = block_lookup_translate_thumb(branch_target);
-    if (!translation_target)
-      return false;
-    generate_branch_patch_unconditional(
-      external_block_exits[i].branch_source, translation_target);
-  }
   return true;
 }
 
