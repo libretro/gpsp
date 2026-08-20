@@ -1196,6 +1196,17 @@ bool retro_load_game(const struct retro_game_info* info)
    if (!gba_screen_pixels)
       return false;
 
+   /* init_gamepak_buffer() allocates the ROM buffers in 1MB blocks and
+    * stops at the first failed malloc, so a memory-starved device can
+    * leave none of them allocated.  load_gamepak() reads the cartridge
+    * header straight out of gamepak_buffers[0], so there is no way to
+    * proceed from here without dereferencing NULL. */
+   if (!gamepak_buffer_count)
+   {
+      error_msg("Not enough memory to allocate the ROM buffer.");
+      return false;
+   }
+
    check_variables(true);
    set_input_descriptors();
 

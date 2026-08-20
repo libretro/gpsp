@@ -2736,6 +2736,17 @@ static s32 load_gamepak_raw(const char *name)
     u32 ldblks = buf_blocks < gamepak_buffer_count ?
                     buf_blocks : gamepak_buffer_count;
 
+    /* With no buffers the loop below reads nothing and every caller is
+     * left looking at an unmapped ROM space and a NULL gamepak_buffers[0].
+     * Report the failure instead of returning success, and leave the
+     * existing mapping alone. */
+    if (!ldblks)
+    {
+      filestream_close(gamepak_file_large);
+      gamepak_file_large = NULL;
+      return -1;
+    }
+
     // Unmap the ROM space since we will re-map it now
     map_null(read, 0x8000000, 0xD000000);
 
