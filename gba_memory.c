@@ -405,6 +405,13 @@ RFILE *gamepak_file_large = NULL;
 u32 gbc_sound_wave_update = 0;
 
 u32 backup_type = BACKUP_UNKN;
+/* Set when BACKUP_EEPROM was inferred from the whole-ROM signature sweep rather
+   than the header scan or the override database. That sweep searches the entire
+   cartridge, so it can match a stale EEPROM_V library string in a game that
+   actually ships SRAM or flash. Such a guess must yield to real bus accesses. */
+static u32 backup_type_eeprom_guessed = 0;
+/* Set once the game actually drives the EEPROM lines at 0x0D. */
+static u32 eeprom_really_used = 0;
 u32 backup_type_reset = BACKUP_UNKN;
 u32 flash_mode = FLASH_BASE_MODE;
 u32 flash_command_position = 0;
@@ -446,7 +453,13 @@ u8 read_backup(u32 address)
   u8 value = 0;
 
   if(backup_type == BACKUP_EEPROM)
-    return 0xff;
+  {
+    if(!backup_type_eeprom_guessed || eeprom_really_used)
+      return 0xff;
+    /* Guessed wrong: this cart drives the SRAM/flash region. Fall through so
+       the usual autodetection below can classify it properly. */
+    backup_type = BACKUP_UNKN;
+  }
 
   if(backup_type == BACKUP_UNKN)
     backup_type = BACKUP_SRAM;
@@ -522,6 +535,7 @@ u32 eeprom_counter = 0;
 
 void function_cc write_eeprom(u32 unused_address, u32 value)
 {
+  eeprom_really_used = 1;
   switch(eeprom_mode)
   {
     case EEPROM_BASE_MODE:
@@ -671,6 +685,7 @@ void function_cc write_eeprom(u32 unused_address, u32 value)
 
 u32 function_cc read_eeprom(void)
 {
+  eeprom_really_used = 1;
   u32 value;
 
   switch(eeprom_mode)
@@ -1115,7 +1130,12 @@ void function_cc write_backup(u32 address, u32 value)
   value &= 0xFF;
 
   if(backup_type == BACKUP_EEPROM)
-    return;
+  {
+    if(!backup_type_eeprom_guessed || eeprom_really_used)
+      return;
+    /* See read_backup(): a real SRAM/flash write overrides a guessed type. */
+    backup_type = BACKUP_UNKN;
+  }
 
   if(backup_type == BACKUP_UNKN)
     backup_type = BACKUP_SRAM;
@@ -2911,6 +2931,7 @@ static void detect_backup_subcircuit(const u8 *rom, u32 rom_size)
       (file_sigs & ROM_SIG_EEPROM))
   {
     backup_type_reset = BACKUP_EEPROM;
+    backup_type_eeprom_guessed = (!has_eeprom && (file_sigs & ROM_SIG_EEPROM)) ? 1 : 0;
     return;
   }
 
@@ -2980,6 +3001,8 @@ u32 load_gamepak(const struct retro_game_info* info, const char *name,
    rtc_enabled = false;
    rumble_enabled = false;
    backup_type_reset = BACKUP_UNKN;
+   backup_type_eeprom_guessed = 0;
+   eeprom_really_used = 0;
    serial_mode = force_serial;
 
    load_game_config_over(game_code);
