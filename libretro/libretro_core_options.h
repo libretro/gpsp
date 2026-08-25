@@ -159,7 +159,7 @@ struct retro_core_option_definition option_defs_us[] = {
          { "32768", NULL },
          { NULL, NULL },
       },
-      "65536"
+      "32768"
    },
    {
       "gpsp_frameskip",
