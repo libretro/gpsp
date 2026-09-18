@@ -34,6 +34,14 @@ u32 a64_update_gba(u32 pc);
 void a64_indirect_branch_arm(u32 address);
 void a64_indirect_branch_thumb(u32 address);
 void a64_indirect_branch_dual(u32 address);
+void execute_vram_arm(u32 address);
+void execute_vram_thumb(u32 address);
+
+/* Cache only the dispatch stub, never the mutable VRAM instructions. */
+#define HAVE_VRAM_INTERPRETER
+#define generate_vram_interpreter(type)                                      \
+  generate_load_imm(reg_a0, pc);                                              \
+  aa64_emit_branch(aa64_br_offset(execute_vram_##type));
 
 u32 execute_read_cpsr();
 u32 execute_read_spsr();

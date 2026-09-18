@@ -338,6 +338,29 @@ defsymbl(execute_swi)
   ret
 .size execute_swi, .-execute_swi
 
+// The cached stub supplies the actual VRAM PC, including for direct exits.
+// No VRAM opcodes are translated, so writes/DMA cannot leave stale code.
+defsymbl(execute_vram_arm)
+  str w0, [reg_base, #REG_PC]
+  consolidate_flags(w0)
+  bic w0, w0, #0x20
+  b execute_vram_common
+
+defsymbl(execute_vram_thumb)
+  str w0, [reg_base, #REG_PC]
+  consolidate_flags(w0)
+  orr w0, w0, #0x20
+
+execute_vram_common:
+  str w0, [reg_base, #REG_CPSR]
+  store_registers()
+  mov w0, reg_cycles
+  bl execute_arm_vram
+  tbnz w0, #31, return_to_main
+  and reg_cycles, w0, #0x7fff
+  ldr w0, [reg_base, #REG_PC]
+  b lookup_pc
+
 defsymbl(execute_arm_translate_internal)
   // save registers that will be clobbered
   sub sp, sp, #96

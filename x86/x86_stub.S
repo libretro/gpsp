@@ -217,6 +217,33 @@ defsymbl(x86_indirect_branch_dual)
   jmp *FULLREG(ax)
 
 
+# Enter mutable GBA VRAM through the interpreter. The generated VRAM stub puts
+# the exact guest PC in eax and jumps here without adding another host return
+# address, so return_to_main keeps the normal stack discipline.
+defsymbl(execute_vram_arm)
+  mov %eax, REG_PC(REG_BASE)
+  collapse_flags
+  andl $~0x20, REG_CPSR(REG_BASE)
+  jmp execute_vram_common
+
+defsymbl(execute_vram_thumb)
+  mov %eax, REG_PC(REG_BASE)
+  collapse_flags
+  orl $0x20, REG_CPSR(REG_BASE)
+
+execute_vram_common:
+  mov REG_CYCLES, CARG1_REG
+  CALL_FUNC(execute_arm_vram)
+
+  test %eax, %eax
+  js return_to_main
+
+  mov %eax, REG_CYCLES
+  and $0x7fff, REG_CYCLES
+  extract_flags
+  jmp lookup_pc
+
+
 # General ext memory routines
 
 ext_store_gpio8:              # No GPIO/RTC writes on byte or word access
