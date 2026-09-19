@@ -830,16 +830,18 @@ ld_iwram_##load_type:                     /* IWRAM area                    */;\
   add pc, lr, #4                                                             ;\
                                                                              ;\
 ld_ioram_##load_type:                     /* I/O RAM area                  */;\
+  save_flags()                            /* cmp trashes the guest flags   */;\
   bic r1, r0, #0xff000000                                                    ;\
-  cmp r1, #0x10                                                             ;\
+  cmp r1, #0x10                                                              ;\
   blo 7f                                                                     ;\
-  cmp r1, #0x100                                                            ;\
-  blo ld_slow_##load_type                                                   ;\
-  cmp r1, #0x400                                                            ;\
-  bhs ld_slow_##load_type                                                   ;\
+  cmp r1, #0x100                                                             ;\
+  blo 9f                                  /* slow path, flags saved        */;\
+  cmp r1, #0x400                                                             ;\
+  bhs 9f                                                                     ;\
 7:                                                                           ;\
   add r2, reg_base, #IOREG_OFF                                               ;\
   exec_ld_op_##load_type(10)              /* Clear upper bits (10 LSB)     */;\
+  restore_flags()                                                            ;\
   add pc, lr, #4                                                             ;\
                                                                              ;\
 ld_palram_##load_type:                    /* Palette RAM area              */;\
