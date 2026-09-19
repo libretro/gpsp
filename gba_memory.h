@@ -205,6 +205,73 @@ typedef enum
 #define REG_BGxPC(n)   (REG_BG2PC + ((n)-2)*8)
 #define REG_BGxPD(n)   (REG_BG2PD + ((n)-2)*8)
 
+/* Most I/O reads can stay on the direct memory fast path.  Video, sound and
+ * DMA registers in 0x010..0x0ff contain write-only fields and other read
+ * semantics that need the hardware-aware helper below.  Addresses beyond the
+ * 1 KiB I/O window are not mirrors on real hardware either. */
+static inline bool io_read_requires_handler(u32 address)
+{
+  u32 offset = (address & 0x00ffffff) & ~1U;
+  if (offset >= 0x400)
+    return true;
+  if (offset >= 0x10 && offset <= 0x46)
+    return true;
+  if (offset >= 0x4C && offset <= 0x4E)
+    return true;
+  if (offset >= 0x54 && offset <= 0x5E)
+    return true;
+  if (offset >= 0x8C && offset <= 0x8E)
+    return true;
+  if (offset >= 0xA0 && offset <= 0xB6)
+    return true;
+  if (offset >= 0xBC && offset <= 0xC2)
+    return true;
+  if (offset >= 0xC8 && offset <= 0xCE)
+    return true;
+  if (offset >= 0xD4 && offset <= 0xDA)
+    return true;
+  if (offset >= 0xE0 && offset <= 0xFE)
+    return true;
+
+  /* Read masks/zero values that differ from the raw backing store. */
+  switch (offset)
+  {
+    case 0x062:
+    case 0x064:
+    case 0x136:
+    case 0x142:
+    case 0x15A:
+    case 0x206:
+    case 0x20A:
+    case 0x302:
+    case 0x068:
+    case 0x06C:
+    case 0x072:
+    case 0x074:
+    case 0x078:
+    case 0x084:
+    case 0x066:
+    case 0x06A:
+    case 0x06E:
+    case 0x076:
+    case 0x07A:
+    case 0x07E:
+    case 0x086:
+    case 0x08A:
+    case 0x0B8:
+    case 0x0BA:
+    case 0x0C4:
+    case 0x0C6:
+    case 0x0D0:
+    case 0x0D2:
+    case 0x0DC:
+    case 0x0DE:
+      return true;
+    default:
+      return false;
+  }
+}
+
 #define FLASH_DEVICE_UNDEFINED       0x00
 #define FLASH_DEVICE_MACRONIX_64KB   0x1C
 #define FLASH_DEVICE_AMTEL_64KB      0x3D
@@ -226,6 +293,9 @@ u32 function_cc read_memory16(u32 address);
 u16 function_cc read_memory16_signed(u32 address);
 u32 function_cc read_memory16s(u32 address);
 u32 function_cc read_memory32(u32 address);
+u32 function_cc read_io_register8(u32 address);
+u32 function_cc read_io_register16(u32 address);
+u32 function_cc read_io_register32(u32 address);
 cpu_alert_type function_cc write_memory8(u32 address, u8 value);
 cpu_alert_type function_cc write_memory16(u32 address, u16 value);
 cpu_alert_type function_cc write_memory32(u32 address, u32 value);

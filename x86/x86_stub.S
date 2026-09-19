@@ -459,6 +459,15 @@ ext_load_palette##rtype:                                                     ;\
   ret                                                                        ;\
                                                                              ;\
 ext_load_io##rtype:                                                          ;\
+  mov %eax, %ecx                                                             ;\
+  and $0x00ffffff, %ecx                                                      ;\
+  cmp $0x10, %ecx                                                            ;\
+  jb 7f                                                                      ;\
+  cmp $0x100, %ecx                                                           ;\
+  jb ext_load_slow##rtype                                                    ;\
+  cmp $0x400, %ecx                                                           ;\
+  jae ext_load_slow##rtype                                                   ;\
+7:                                                                           ;\
   and $(0x3FF & addrm), %eax                               /* Addr wrap */   ;\
   movop IORAM_OFF(REG_BASE, FULLREG(ax)), %eax              /* Read mem */   ;\
   ret                                                                        ;\
