@@ -424,6 +424,32 @@ execute_swi_builder(thumb)
 
 @ Uses sp as reg_base; must hold consistently true.
 
+@ Interpret VRAM, then resume the appropriate cached register map/mode.
+defsymbl(execute_vram_arm)
+  save_flags()
+  str r0, [reg_base, #REG_PC]
+  store_registers_arm()
+  collapse_flags(r0)
+  bic r0, r0, #0x20
+  b execute_vram_common
+
+defsymbl(execute_vram_thumb)
+  save_flags()
+  str r0, [reg_base, #REG_PC]
+  store_registers_thumb()
+  collapse_flags(r0)
+  orr r0, r0, #0x20
+
+execute_vram_common:
+  str r0, [reg_base, #REG_CPSR]
+  mvn r0, reg_cycles
+  bl execute_arm_vram
+  cmp r0, #0
+  blt return_to_main
+  bic reg_cycles, r0, #0xF0000000
+  mvn reg_cycles, reg_cycles
+  b lookup_pc
+
 defsymbl(execute_arm_translate_internal)
 
   @ save the registers to be able to return later

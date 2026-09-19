@@ -42,6 +42,20 @@ u32 mips_update_gba(u32 pc);
 void mips_indirect_branch_arm(u32 address);
 void mips_indirect_branch_thumb(u32 address);
 void mips_indirect_branch_dual(u32 address);
+void execute_vram_arm(u32 address);
+void execute_vram_thumb(u32 address);
+
+/* VRAM is mutable code. Cache only a tiny dispatch stub and interpret until
+ * execution leaves VRAM, matching the ARM dynarec path.
+ * The block prologue must be emitted: block_lookup_translate hands out
+ * (block start + block_prologue_size) as the entry point, and the prologue
+ * is also what loads reg_pc, which generate_load_pc depends on. */
+#define HAVE_VRAM_INTERPRETER
+#define generate_vram_interpreter(type)                                      \
+  generate_block_prologue();                                                  \
+  generate_load_pc(reg_a0, pc);                                               \
+  mips_emit_j(mips_absolute_offset(execute_vram_##type));                     \
+  mips_emit_nop()
 
 u32 execute_read_cpsr();
 u32 execute_read_spsr();

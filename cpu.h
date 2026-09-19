@@ -110,6 +110,9 @@ typedef enum
 extern u32 instruction_count;
 
 void execute_arm(u32 cycles);
+/* Interpret mutable VRAM until execution leaves it or a frame completes.
+ * Returns the same cycle-count/frame-complete encoding as update_gba(). */
+u32 function_cc execute_arm_vram(u32 cycles);
 u32 check_and_raise_interrupts(void);
 cpu_alert_type check_interrupt(void);
 cpu_alert_type flag_interrupt(irq_type irq_raised);

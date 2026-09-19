@@ -27,6 +27,16 @@ u32 x86_update_gba(u32 pc);
 void x86_indirect_branch_arm(u32 address);
 void x86_indirect_branch_thumb(u32 address);
 void x86_indirect_branch_dual(u32 address);
+void execute_vram_arm(u32 address);
+void execute_vram_thumb(u32 address);
+
+/* VRAM is mutable code. Cache only a tiny dispatch stub and interpret until
+ * execution leaves VRAM, matching the ARM dynarec path. */
+#define HAVE_VRAM_INTERPRETER
+#define generate_vram_interpreter(type)                                      \
+  generate_load_imm(a0, pc);                                                  \
+  x86_emit_jmp_offset(x86_relative_offset(translation_ptr,                    \
+   execute_vram_##type, 4));
 
 void function_cc execute_store_cpsr(u32 new_cpsr, u32 store_mask);
 

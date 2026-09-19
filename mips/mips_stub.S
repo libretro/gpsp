@@ -317,6 +317,35 @@ defsymbl(mips_indirect_branch_dual)
   nop
 
 
+# Enter mutable GBA VRAM through the interpreter. The generated VRAM stub puts
+# the exact guest PC in $4 and jumps here. Guest registers are saved to reg[]
+# before C runs and lookup_pc reloads them when returning to translated code.
+defsymbl(execute_vram_arm)
+  sw $4, REG_PC($16)
+  collapse_flags                  # full CPSR remains in $2
+  addiu $1, $zero, -33            # ~(1 << 5)
+  and $2, $2, $1                  # force ARM mode
+  b execute_vram_common
+  sw $2, REG_CPSR($16)
+
+defsymbl(execute_vram_thumb)
+  sw $4, REG_PC($16)
+  collapse_flags                  # full CPSR remains in $2
+  ori $2, $2, 0x20               # force Thumb mode
+  sw $2, REG_CPSR($16)
+
+execute_vram_common:
+  save_registers
+  move $4, reg_cycles
+  cfncall execute_arm_vram, 10
+
+  bltz $2, return_to_main
+  and reg_cycles, $2, 0x7FFF      # delay slot; harmless on frame exit
+
+  b lookup_pc
+  nop
+
+
 # Called on I/O writes that have side-effects
 defsymbl(write_io_epilogue)
   # Check for SMC, IRQ, and HALT bits
@@ -610,6 +639,7 @@ fnptrs:
   .long execute_store_cpsr_body        # 7
   .long process_cheats                 # 8
   .long check_and_raise_interrupts     # 9
+  .long execute_arm_vram               # 10
 
 #if !defined(MMAP_JIT_CACHE)
 

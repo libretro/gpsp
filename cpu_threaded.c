@@ -2624,6 +2624,12 @@ static bool process_deferred_exits(void)
   pc &= ~0x01                                                                 \
 
 
+#ifdef HAVE_VRAM_INTERPRETER
+#define vram_lookup_region case 0x06:
+#else
+#define vram_lookup_region
+#endif
+
 #define block_lookup_translate_builder(type)                                  \
 u8 function_cc *block_lookup_translate_##type(u32 pc)                         \
 {                                                                             \
@@ -2671,6 +2677,7 @@ u8 function_cc *block_lookup_translate_##type(u32 pc)                         \
       return NULL;                                                            \
     }                                                                         \
                                                                               \
+    vram_lookup_region                                                        \
     case 0x0:                                                                 \
     case 0x8 ... 0xD:                                                         \
     {                                                                         \
@@ -3111,6 +3118,26 @@ if (ram_region) {                                                             \
   }                                                                           \
 }                                                                             \
 
+/* ROM-cache entries for VRAM contain only an immutable PC and a branch to
+ * the interpreter bridge. In particular, speculative/direct branch linking
+ * must not change reg[PC] while compiling some other block. */
+#ifdef HAVE_VRAM_INTERPRETER
+#define translate_vram_entry(type)                                           \
+  if ((pc >> 24) == 0x06) {                                                  \
+    translation_ptr = rom_translation_ptr;                                   \
+    if (translation_ptr > rom_translation_cache + ROM_TRANSLATION_CACHE_SIZE \
+                          - TRANSLATION_CACHE_LIMIT_THRESHOLD) {             \
+      flush_translation_cache_rom();                                         \
+      return false;                                                          \
+    }                                                                        \
+    generate_vram_interpreter(type);                                         \
+    rom_translation_ptr = translation_ptr;                                   \
+    return true;                                                             \
+  }
+#else
+#define translate_vram_entry(type)
+#endif
+
 bool translate_block_arm(u32 pc, bool ram_region)
 {
   u32 opcode = 0;
@@ -3134,6 +3161,7 @@ bool translate_block_arm(u32 pc, bool ram_region)
   u32 flag_status;
   generate_block_extra_vars_arm();
   arm_fix_pc();
+  translate_vram_entry(arm);
 
   if(!pc_address_block)
     pc_address_block = load_gamepak_page(pc_region & 0x3FF);
@@ -3282,6 +3310,7 @@ bool translate_block_thumb(u32 pc, bool ram_region)
   u32 flag_status;
   generate_block_extra_vars_thumb();
   thumb_fix_pc();
+  translate_vram_entry(thumb);
 
   if(!pc_address_block)
     pc_address_block = load_gamepak_page(pc_region & 0x3FF);

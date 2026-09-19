@@ -43,6 +43,14 @@ void arm_indirect_branch_arm(u32 address);
 void arm_indirect_branch_thumb(u32 address);
 void arm_indirect_branch_dual_arm(u32 address);
 void arm_indirect_branch_dual_thumb(u32 address);
+void execute_vram_arm(u32 address);
+void execute_vram_thumb(u32 address);
+
+#define HAVE_VRAM_INTERPRETER
+#define generate_vram_interpreter(type)                                      \
+  arm_load_imm_32bit(reg_a0, pc);                                             \
+  arm_load_imm_32bit(reg_a1, (u32)execute_vram_##type);                         \
+  ARM_BX(0, reg_a1);
 
 void execute_store_cpsr(u32 new_cpsr);
 u32 execute_store_cpsr_body(u32 _cpsr, u32 store_mask, u32 address);
