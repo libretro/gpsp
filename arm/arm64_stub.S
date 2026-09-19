@@ -443,6 +443,19 @@ ld_iwram_##load_type:                     /* IWRAM area                    */;\
   ret                                                                        ;\
                                                                              ;\
 ld_ioram_##load_type:                     /* I/O RAM area                  */;\
+  /* Hot readable registers live below 0x10 (DISP/VCOUNT) or in 0x100..0x3ff
+   * (timers, keys, IRQ, serial).  Only 0x10..0xff and out-of-range I/O need
+   * the hardware-aware slow reader.  Test bits 4..23 first so VCOUNT keeps a
+   * two-instruction dispatch; bits 8..9 distinguish 0x100..0x3ff. */         ;\
+  tst w0, #0x00fffff0                                                       ;\
+  b.ne 8f                                                                    ;\
+  and w0, w0, #(0x3ff)                                                       ;\
+  add x3, reg_base, #(IOREG_OFF)                                             ;\
+  ldop w0, [x3, x0]                                                          ;\
+  ret                                                                        ;\
+8:                                                                           ;\
+  tst w0, #0x300                                                            ;\
+  b.eq ld_slow_##load_type                                                  ;\
   and w0, w0, #(0x3ff)                                                       ;\
   add x3, reg_base, #(IOREG_OFF)                                             ;\
   ldop w0, [x3, x0]                                                          ;\

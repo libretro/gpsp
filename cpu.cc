@@ -854,6 +854,8 @@ const u32 spsr_masks[4] = { 0x00000000, 0x000000EF, 0xF0000000, 0xF00000EF };
 {                                                                             \
   u8 *map;                                                                    \
   u32 _address = addr;                                                        \
+  bool _io_handler = ((_address >> 24) == 0x04) &&                            \
+                     io_read_requires_handler(_address);                       \
                                                                               \
   if(_address < 0x10000000)                                                   \
   {                                                                           \
@@ -866,10 +868,21 @@ const u32 spsr_masks[4] = { 0x00000000, 0x000000EF, 0xF0000000, 0xF00000EF };
   if (                                                                        \
      (((_address >> 24) == 0) && (reg[REG_PC] >= 0x4000)) ||  /* BIOS read */ \
      (_address & aligned_address_mask##size) ||      /* Unaligned access */   \
+     _io_handler ||                                  /* Special I/O read */   \
      !(map = memory_map_read[_address >> 15])        /* Unmapped memory */    \
   )                                                                           \
   {                                                                           \
-    dest = (type)(readfn)(_address);                                          \
+    if (_io_handler)                                                          \
+    {                                                                         \
+      /* The interpreter has already advanced PC for this instruction.        \
+       * read_open* expects the current instruction PC, like dynarec stubs. */ \
+      u32 _saved_pc = reg[REG_PC];                                            \
+      reg[REG_PC] -= (reg[REG_CPSR] & 0x20) ? 2 : 4;                         \
+      dest = (type)(readfn)(_address);                                        \
+      reg[REG_PC] = _saved_pc;                                                \
+    }                                                                         \
+    else                                                                      \
+      dest = (type)(readfn)(_address);                                        \
   }                                                                           \
   else                                                                        \
   {                                                                           \
@@ -895,6 +908,8 @@ const u32 spsr_masks[4] = { 0x00000000, 0x000000EF, 0xF0000000, 0xF00000EF };
 {                                                                             \
   u32 _address = address;                                                     \
   u8 *map = memory_map_read[_address >> 15];                                  \
+  bool _io_handler = ((_address >> 24) == 0x04) &&                            \
+                     io_read_requires_handler(_address);                       \
   if(_address < 0x10000000)                                                   \
   {                                                                           \
     /* Account for cycles and other stats */                                  \
@@ -902,13 +917,21 @@ const u32 spsr_masks[4] = { 0x00000000, 0x000000EF, 0xF0000000, 0xF00000EF };
     cycles_remaining -= ws_cyc_seq[region][1];                                \
     STATS_MEMORY_ACCESS(read, u32, region);                                   \
   }                                                                           \
-  if(_address < 0x10000000 && map)                                            \
+  if(_address < 0x10000000 && map && !_io_handler)                            \
   {                                                                           \
     dest = readaddress32(map, _address & 0x7FFF);                             \
   }                                                                           \
   else                                                                        \
   {                                                                           \
-    dest = read_memory32(_address);                                           \
+    if (_io_handler)                                                          \
+    {                                                                         \
+      u32 _saved_pc = reg[REG_PC];                                            \
+      reg[REG_PC] -= (reg[REG_CPSR] & 0x20) ? 2 : 4;                         \
+      dest = read_memory32(_address);                                         \
+      reg[REG_PC] = _saved_pc;                                                \
+    }                                                                         \
+    else                                                                      \
+      dest = read_memory32(_address);                                         \
   }                                                                           \
 }                                                                             \
 

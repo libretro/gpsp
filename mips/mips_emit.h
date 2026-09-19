@@ -2157,6 +2157,44 @@ static void emit_pmemld_stub(
   // (so there's 10 of them). They live in the top stub addresses.
   mips_emit_b(bne, reg_zero, reg_temp, ld_phndlr_branch(memop_number));
 
+  if (region == 4) {
+    /* Keep the common I/O reads on the direct path, but route the block that
+     * contains write-only/masked video, sound and DMA registers through the
+     * hardware-aware C reader.  This mirrors the ARM/x86 stubs without making
+     * VCOUNT, timers or key input pay for a function call. */
+    const u32 hndreadtbl[] = {
+      (u32)&read_memory8,  (u32)&read_memory16, (u32)&read_memory32,
+      (u32)&read_memory8s, (u32)&read_memory16s, (u32)&read_memory32 };
+    u8 *direct1, *slow1, *direct2;
+
+    mips_emit_andi(reg_temp, reg_a0, 0xFFFF);
+    mips_emit_sltiu(reg_rv, reg_temp, 0x10);
+    mips_emit_b_filler(bne, reg_rv, reg_zero, direct1);
+    mips_emit_nop();
+    mips_emit_sltiu(reg_rv, reg_temp, 0x100);
+    mips_emit_b_filler(bne, reg_rv, reg_zero, slow1);
+    mips_emit_nop();
+    mips_emit_sltiu(reg_rv, reg_temp, 0x400);
+    mips_emit_b_filler(bne, reg_rv, reg_zero, direct2);
+    mips_emit_nop();
+
+    generate_branch_patch_conditional(slow1, translation_ptr);
+    emit_save_regs(true);
+    mips_emit_sw(mips_reg_ra, reg_base, ReOff_SaveR1);
+    genccall(hndreadtbl[size + (signext ? 3 : 0)]);
+    if (!aligned) {
+      mips_emit_sw(reg_a1, reg_base, ReOff_RegPC);
+    } else {
+      mips_emit_nop();
+    }
+    mips_emit_lw(mips_reg_ra, reg_base, ReOff_SaveR1);
+    emit_restore_regs(true);
+    generate_function_return_swap_delay();
+
+    generate_branch_patch_conditional(direct1, translation_ptr);
+    generate_branch_patch_conditional(direct2, translation_ptr);
+  }
+
   // BIOS region requires extra checks for protected reads
   if (region == 0) {
     // BIOS is *not* mirrored, check that
