@@ -221,12 +221,14 @@ defsymbl(x86_indirect_branch_dual)
 # the exact guest PC in eax and jumps here without adding another host return
 # address, so return_to_main keeps the normal stack discipline.
 defsymbl(execute_vram_arm)
+  sub $ADDR_SIZE_BYTES, STACK_REG     # entered by jmp: fake the return slot lookup_pc/return_to_main pop
   mov %eax, REG_PC(REG_BASE)
   collapse_flags
   andl $~0x20, REG_CPSR(REG_BASE)
   jmp execute_vram_common
 
 defsymbl(execute_vram_thumb)
+  sub $ADDR_SIZE_BYTES, STACK_REG     # entered by jmp: fake the return slot lookup_pc/return_to_main pop
   mov %eax, REG_PC(REG_BASE)
   collapse_flags
   orl $0x20, REG_CPSR(REG_BASE)
