@@ -788,7 +788,8 @@ u32 function_cc read_io_register16(u32 address)
     case 0x082:
       return value & 0x770F;
     case 0x084:
-      return value & 0x0080;
+      /* Bits 0-3 are the PSG channel status flags kept up to date by sound.c */
+      return value & 0x008F;
     case 0x0BA:
     case 0x0C6:
     case 0x0D2:
