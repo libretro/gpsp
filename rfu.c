@@ -26,6 +26,18 @@
   #define RFU_DEBUG_LOG(...)
 #endif
 
+// Experimental transport queue capacity. Four RFU player slots remain unchanged.
+#ifndef RFU_RX_QUEUE_SIZE
+#define RFU_RX_QUEUE_SIZE 4
+#endif
+#if RFU_RX_QUEUE_SIZE < 4 || RFU_RX_QUEUE_SIZE > 64
+#error RFU_RX_QUEUE_SIZE must be between 4 and 64
+#endif
+static unsigned rfu_diag_host_drop, rfu_diag_client_drop;
+static unsigned rfu_diag_host_noresp, rfu_diag_timeout;
+static unsigned rfu_diag_host_peak, rfu_diag_client_peak, rfu_diag_frames;
+void rfu_diagnostic_log(unsigned, unsigned, unsigned, unsigned, unsigned, unsigned);
+
 // Config knobs, update with care.
 #define BCST_ANNOUNCE_VB               30   // Send broadcast twice per second.
 #define MAX_RFU_PEERS  MAX_RFU_NETPLAYERS   // Do not allow more than 32 peers.
@@ -138,7 +150,7 @@ static struct {
     struct {
       u32 datalen;   // Byte count of data waiting to be polled.
       u8  data[16];  // Data received from client.
-    } pkts[4];
+    } pkts[RFU_RX_QUEUE_SIZE];
   } clients[4];      // Connected clients IDs (zero means empty slot).
 } rfu_host;
 
@@ -150,7 +162,7 @@ static struct {
   struct {
     u16 hblen;       // Bytes received from the host.
     u8 hdata[128];   // Data received from the host (accumulated).
-  } pkts[4];
+  } pkts[RFU_RX_QUEUE_SIZE];
 } rfu_client;
 
 typedef struct {
@@ -503,8 +515,8 @@ static s32 rfu_process_command() {
           rfu_buf[0] |= dlen << (8 + i * 5);
           // Discard front packet
           memmove(&rfu_host.clients[i].pkts[0], &rfu_host.clients[i].pkts[1],
-                  3 * sizeof(rfu_host.clients[i].pkts[0]));
-          rfu_host.clients[i].pkts[3].datalen = 0;
+                  (RFU_RX_QUEUE_SIZE - 1) * sizeof(rfu_host.clients[i].pkts[0]));
+          rfu_host.clients[i].pkts[RFU_RX_QUEUE_SIZE - 1].datalen = 0;
         }
       }
       // Copy data into words into the RFU buffer.
@@ -521,8 +533,8 @@ static s32 rfu_process_command() {
         rfu_buf[cnt++] = leupack32(&rfu_client.pkts[0].hdata[j*4]);
 
       // Move to the next packet
-      memmove(&rfu_client.pkts[0], &rfu_client.pkts[1], sizeof(rfu_client.pkts[0]) * 3);
-      rfu_client.pkts[3].hblen = 0;
+      memmove(&rfu_client.pkts[0], &rfu_client.pkts[1], sizeof(rfu_client.pkts[0]) * (RFU_RX_QUEUE_SIZE - 1));
+      rfu_client.pkts[RFU_RX_QUEUE_SIZE - 1].hblen = 0;
       return cnt;
     }
     break;
@@ -681,6 +693,13 @@ u32 rfu_transfer(u32 sent_value) {
 
 // Gets called every frame for basic device updates.
 void rfu_frame_update() {
+  /* Low-rate counters, no packet payload or per-packet logging. */
+  if (++rfu_diag_frames == 300) {
+    rfu_diag_frames = 0;
+    if (rfu_diag_host_peak || rfu_diag_client_peak || rfu_diag_host_noresp || rfu_diag_timeout)
+      rfu_diagnostic_log(rfu_diag_host_drop, rfu_diag_client_drop,
+          rfu_diag_host_noresp, rfu_diag_timeout, rfu_diag_host_peak, rfu_diag_client_peak);
+  }
   // If device is in reset state, do nothing really.
   if (rfu_comstate != RFU_COMSTATE_RESET) {
     u32 i;
@@ -816,14 +835,16 @@ void rfu_net_receive(const void* buf, size_t len, uint16_t client_id) {
           rfu_net_send_cmd(client_id, NET_RFU_CLIENT_ACK,
                            rfu_client.devid | (rfu_client.clnum << 16));
           // Receive data from the host. Queue que packet if possible
-          for (i = 0; i < 4; i++) {
+          for (i = 0; i < RFU_RX_QUEUE_SIZE; i++) {
             if (!rfu_client.pkts[i].hblen) {
               memcpy(&rfu_client.pkts[i].hdata, payl, blen);
               rfu_client.pkts[i].hblen = blen;
+              rfu_diag_client_peak = MAX(rfu_diag_client_peak, i + 1);
               RFU_DEBUG_LOG("Recv host packet (%d bytes) Q[#%d]\n", blen, i);
               return;
             }
           }
+          rfu_diag_client_drop++;
           RFU_DEBUG_LOG("Client dropped a host packet\n");
         }
       }
@@ -840,14 +861,16 @@ void rfu_net_receive(const void* buf, size_t len, uint16_t client_id) {
         // Validate the slot with device ID
         if (rfu_host.clients[clid].devid == cdevid) {
           rfu_host.clients[clid].clttl = 0;   // Account for packet reception
-          for (i = 0; i < 4; i++) {
+          for (i = 0; i < RFU_RX_QUEUE_SIZE; i++) {
             if (!rfu_host.clients[clid].pkts[i].datalen) {
               memcpy(rfu_host.clients[clid].pkts[i].data, payl, blen);
               rfu_host.clients[clid].pkts[i].datalen = blen;
+              rfu_diag_host_peak = MAX(rfu_diag_host_peak, i + 1);
               RFU_DEBUG_LOG("Recv client packet (%d bytes) Q[#%d]\n", blen, i);
               return;
             }
           }
+          rfu_diag_host_drop++;
           RFU_DEBUG_LOG("Host dropped a client packet\n");
         }
       }
@@ -908,6 +931,7 @@ bool rfu_update(unsigned cycles) {
         rfu_comstate = RFU_COMSTATE_WAITRESP;
       }
       else if (rfu_state == RFU_STATE_HOST && !rfu_resp_timeout) {
+        rfu_diag_host_noresp++;
         // We "retransmitted" the message N times (not really, but the equivalent
         // time has elapsed) and we simulate a lack of client response.
         rfu_buf[0] = 0x99660000 | RFU_CMD_RESP_DATA | (1 << 8);
@@ -918,6 +942,7 @@ bool rfu_update(unsigned cycles) {
         rfu_comstate = RFU_COMSTATE_WAITRESP;
       }
       else if (!rfu_timeout_cycles) {
+        rfu_diag_timeout++;
         // We ran out of time, just return an "error" code
         rfu_buf[0] = 0x99660000 | RFU_CMD_RESP_TIMEO;
         rfu_buf[1] = 0x80000000;

@@ -108,6 +108,13 @@ static bool update_audio_latency             = false;
 static bios_type selected_bios               = auto_detect;
 
 static retro_log_printf_t log_cb;
+
+void rfu_diagnostic_log(unsigned hd, unsigned cd, unsigned nr, unsigned to, unsigned hp, unsigned cp)
+{
+   if (log_cb)
+      log_cb(RETRO_LOG_INFO, "[gpSP RFU diagnostic] host_drop=%u client_drop=%u host_no_response=%u timeout=%u host_peak=%u client_peak=%u\n", hd, cd, nr, to, hp, cp);
+}
+
 static retro_video_refresh_t video_cb;
 static retro_audio_sample_batch_t audio_batch_cb;
 static retro_input_poll_t input_poll_cb;
