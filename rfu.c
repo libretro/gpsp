@@ -728,7 +728,7 @@ void rfu_net_receive(const void* buf, size_t len, uint16_t client_id) {
     case NET_RFU_BROADCAST:
       // Fill the broadcast slot for the peer
       RFU_DEBUG_LOG("Got broadcast (client: #%d devID: %02x)\n", client_id, hdata);
-      if (client_id < MAX_RFU_PEERS) {
+      if (client_id < MAX_RFU_PEERS && len >= 12 + 6 * 4) {
         rfu_peer_bcst[client_id].device_id = hdata;
         rfu_peer_bcst[client_id].valid = 1;
         rfu_peer_bcst[client_id].ttl = 0xff;
@@ -796,10 +796,11 @@ void rfu_net_receive(const void* buf, size_t len, uint16_t client_id) {
         // Clear the client from the list
         u32 clnum = (hdata >> 16) & 0x3;
         u16 cldid = hdata & 0xffff;
-        if (rfu_host.clients[clnum].devid == cldid)
+        if (rfu_host.clients[clnum].devid == cldid &&
+            rfu_host.clients[clnum].client_id == client_id)
           memset(&rfu_host.clients[clnum], 0, sizeof(rfu_host.clients[clnum]));
       }
-      else if (rfu_state == RFU_STATE_CLIENT) {
+      else if (rfu_state == RFU_STATE_CLIENT && client_id == rfu_client.host_id) {
         // Go back to idle state!
         memset(&rfu_client, 0, sizeof(rfu_client));
         rfu_state = RFU_STATE_IDLE;
@@ -807,8 +808,8 @@ void rfu_net_receive(const void* buf, size_t len, uint16_t client_id) {
       break;
 
     case NET_RFU_HOST_SEND:
-      // Only possible if we are a client
-      if (rfu_state == RFU_STATE_CLIENT) {
+      // Only possible if we are a client, and only from our host
+      if (rfu_state == RFU_STATE_CLIENT && client_id == rfu_client.host_id) {
         u32 blen = hdata & 0x7f;
         if (len >= blen + 12) {
           u32 i;
@@ -837,8 +838,12 @@ void rfu_net_receive(const void* buf, size_t len, uint16_t client_id) {
         u32 clid = (hdata >> 16) & 0x3;
         u32 blen = hdata >> 24;
 
-        // Validate the slot with device ID
-        if (rfu_host.clients[clid].devid == cdevid) {
+        // Validate the slot (device ID and sender) and the payload size: the
+        // per-packet buffer holds 16 bytes and blen comes from the peer.
+        if (rfu_host.clients[clid].devid == cdevid &&
+            rfu_host.clients[clid].client_id == client_id &&
+            blen <= sizeof(rfu_host.clients[clid].pkts[0].data) &&
+            len >= blen + 12) {
           rfu_host.clients[clid].clttl = 0;   // Account for packet reception
           for (i = 0; i < 4; i++) {
             if (!rfu_host.clients[clid].pkts[i].datalen) {
@@ -851,6 +856,7 @@ void rfu_net_receive(const void* buf, size_t len, uint16_t client_id) {
           RFU_DEBUG_LOG("Host dropped a client packet\n");
         }
       }
+      break;
 
     case NET_RFU_CLIENT_ACK:
       // Should only happen when hosting
@@ -858,7 +864,8 @@ void rfu_net_receive(const void* buf, size_t len, uint16_t client_id) {
         u32 devid = hdata & 0xffff;
         u32 clid = (hdata >> 16) & 0x3;
 
-        if (rfu_host.clients[clid].devid == devid)
+        if (rfu_host.clients[clid].devid == devid &&
+            rfu_host.clients[clid].client_id == client_id)
           rfu_host.clients[clid].clttl = 0;   // Account for packet reception
       }
     };
