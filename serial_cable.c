@@ -150,7 +150,7 @@ bool dual_cable_pending(void);
 #define XMODE_MULTI            0
 #define XMODE_NORMAL           1
 
-#define CBL_QUEUE_SIZE         256
+#define CBL_QUEUE_SIZE         4096      // A normal mode transfer burst (multiboot) can be frames ahead
 #define CBL_POLL_CYCLES        4096      // Children poll the network ~68 times per frame
 #define CBL_TICK_CYCLES        35112     // Parent reports its clock 8 times per frame
 #define CBL_ACTIVE_CYCLES      (60 * CBL_FRAME_CYCLES)  // The link is in use for ~1s after a transfer
@@ -717,11 +717,52 @@ static bool child_finish_local(void) {
   return child_finish(w[0], w[1], w[2], w[3]);
 }
 
+// The oldest normal mode word that is waiting for its time (see
+// child_update): our clock must never get past it, or it would be late.
+static bool child_normal_due(u32 *at) {
+  if (cbl.q_count) {
+    const cable_event *ev = &cbl.queue[cbl.q_head];
+    if (ev->type == PKT_XFER && (ev->b & 0xFF) != XMODE_MULTI) {
+      *at = ev->c;
+      return true;
+    }
+  }
+  return false;
+}
+
+// Whether the game is set to take a normal mode word right now (external
+// clock, same word size).
+static bool child_normal_ready(const cable_event *ev) {
+  const u16 siocnt = read_ioreg(REG_SIOCNT);
+  const bool bits32 = (ev->b >> 16) & 1;
+  return in_normal_mode() && (siocnt & 0x0081) == 0x0080 &&
+         ((siocnt & 0x1000) != 0) == bits32;
+}
+
+// A normal mode word whose time has come but the game is not ready for yet:
+// it has been handed the previous word only just now (several were due at
+// once) and is still in its serial interrupt, about to arm the next one.
+// It is kept for a little while, as the wire would be if we were on time.
+static bool child_normal_held(void) {
+  u32 at;
+  if (!child_normal_due(&at) || (s32)(cbl.s_time - at) < 0)
+    return false;
+  return !child_normal_ready(&cbl.queue[cbl.q_head]) &&
+         (s32)(cbl.s_time - at) < CBL_FRAME_CYCLES;
+}
+
+static void child_clamp_time(void) {
+  u32 at;
+  if (child_normal_due(&at) && (s32)(cbl.s_time - at) > 0)
+    cbl.s_time = at;
+}
+
 // The parent clock is (again) known: take our place on it.
 static void child_sync(void) {
   if (cbl.s_live && cbl.s_resync) {
     cbl.s_resync = 0;
     cbl.s_time = cbl.s_pclock;
+    child_clamp_time();
   }
 }
 
@@ -900,8 +941,10 @@ static bool child_update(unsigned cycles) {
   // Do not run ahead of the parent: wait here, where we can still answer.
   while (cbl.s_live && !irq && !child_busy()) {
     child_sync();
-    if ((s32)(cbl.s_pclock - cbl.s_time) > CBL_MAX_LAG_CYCLES)
+    if ((s32)(cbl.s_pclock - cbl.s_time) > CBL_MAX_LAG_CYCLES) {
       cbl.s_time = cbl.s_pclock - CBL_MAX_LAG_CYCLES;
+      child_clamp_time();
+    }
     if ((s32)(cbl.s_time - cbl.s_pclock) <= CBL_SLACK_CYCLES)
       break;
 
@@ -916,6 +959,16 @@ static bool child_update(unsigned cycles) {
     const cable_event ev = cbl.queue[cbl.q_head];
     if (ev.type == PKT_XFER && cbl.s_inxfer && cbl.s_local)
       break;      // Previous transfer is not over yet, keep it for later.
+    // A normal mode word gets here as soon as the parent sends it, but on
+    // the wire it arrives when the parent clock says so: the game must have
+    // had that time to get ready for it (multiboot loaders re-arm the
+    // transfer after each word), or it is lost.
+    if (ev.type == PKT_XFER && (ev.b & 0xFF) != XMODE_MULTI && cbl.s_live &&
+        (s32)(ev.c - cbl.s_time) > 0)
+      break;
+    if (ev.type == PKT_XFER && (ev.b & 0xFF) != XMODE_MULTI && ME == 1 &&
+        child_normal_held())
+      break;
 
     cbl.q_head = (cbl.q_head + 1) % CBL_QUEUE_SIZE;
     cbl.q_count--;
@@ -991,6 +1044,7 @@ bool serialcable_frame_end(void) {
   }
   else if (ahead > CBL_SLACK_CYCLES / 4)
     cbl.s_time -= MIN(ahead, CBL_ALIGN_CYCLES);
+  child_clamp_time();
 
   // The parent is about to need us and we would not be back in time: stay.
   if (cbl.s_pnext_valid && !cbl.f_stayed) {
@@ -1025,11 +1079,24 @@ u32 serialcable_next_event(void) {
     next = MIN(next, cbl.s_gap);
   if (cbl.s_ahead && (s32)(cbl.s_ahead_until - cbl.s_time) > 0)
     next = MIN(next, cbl.s_ahead_until - cbl.s_time);
+  {
+    u32 at;
+    if (cbl.s_live && child_normal_due(&at) && (s32)(at - cbl.s_time) > 0)
+      next = MIN(next, at - cbl.s_time);
+    else if (child_normal_held())
+      next = MIN(next, 64);     // Look again once the game had a moment.
+  }
   return next;
 }
 
 // Account for consumed cycles and return if a serial IRQ should be raised.
 bool serialcable_update(unsigned cycles) {
+  // update_gba can hand us a negative count: a timer started in the middle
+  // of a block shortens the cycles to run after the CPU already took them
+  // into account. Time does not go back on the cable (it would read as
+  // ages gone by: the link would be idle, children would lose the parent).
+  if ((s32)cycles < 0)
+    cycles = 0;
   cbl.clock += cycles;
 
   if (cbl.link_dirty) {
