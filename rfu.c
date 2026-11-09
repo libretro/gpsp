@@ -33,6 +33,28 @@
 #define RFU_DEF_TIMEOUT              32   // Expressed as frames (~533ms)
 #define RFU_DEF_RTXMAX                4   // Up to 4 transmissions per send
 
+// Netplay link timeouts, overridable at build time (-D...). The defaults
+// match a real adapter; a peer over the network may need longer waits.
+#ifndef RFU_TIMEOUT_MULT
+#define RFU_TIMEOUT_MULT              1   // Scales the game-set wait timeout
+#endif
+#ifndef RFU_RESP_TIMEOUT_MULT
+#define RFU_RESP_TIMEOUT_MULT         1   // Scales the host's client response wait
+#endif
+#ifndef RFU_CLIENT_TTL
+#define RFU_CLIENT_TTL              240   // Frames before a silent client is dropped (4s)
+#endif
+// Keep the cycle counts and the u16 client TTL from overflowing.
+#if RFU_TIMEOUT_MULT < 1 || RFU_TIMEOUT_MULT > 15
+#error RFU_TIMEOUT_MULT must be between 1 and 15
+#endif
+#if RFU_RESP_TIMEOUT_MULT < 1 || RFU_RESP_TIMEOUT_MULT > 64
+#error RFU_RESP_TIMEOUT_MULT must be between 1 and 64
+#endif
+#if RFU_CLIENT_TTL < 60 || RFU_CLIENT_TTL > 65535
+#error RFU_CLIENT_TTL must be between 60 and 65535
+#endif
+
 
 // Unpacks big endian integers used for signaling
 static inline u32 upack32(const u8 *ptr) {
@@ -644,8 +666,9 @@ u32 rfu_transfer(u32 sent_value) {
     // and reverse the clock roles (the RFU becomes master).
     if (rfu_cmd == RFU_CMD_WAIT || rfu_cmd == RFU_CMD_RTX_WAIT || rfu_cmd == RFU_CMD_SEND_DATAW) {
       rfu_comstate = RFU_COMSTATE_WAITEVENT;
-      rfu_timeout_cycles = rfu_timeout * (16777216 / 60);  // Frames to cycles
-      rfu_resp_timeout = rfu_rtx_max * (16777216 / 60 / 6);  // RFU "frame" to cycles
+      rfu_timeout_cycles = rfu_timeout * RFU_TIMEOUT_MULT * (16777216 / 60);  // Frames to cycles
+      // RFU "frame" to cycles
+      rfu_resp_timeout = rfu_rtx_max * RFU_RESP_TIMEOUT_MULT * (16777216 / 60 / 6);
     } else {
       rfu_comstate = rfu_plen ? RFU_COMSTATE_RESPDAT : RFU_COMSTATE_WAITCMD;
     }
@@ -704,7 +727,7 @@ void rfu_frame_update() {
     if (rfu_state == RFU_STATE_HOST) {
       for (i = 0; i < 4; i++) {
         if (rfu_host.clients[i].devid) {
-          if (++rfu_host.clients[i].clttl >= 240 /* 4s */) {
+          if (++rfu_host.clients[i].clttl >= RFU_CLIENT_TTL) {
             // The client hasn't sent stuff for a while, disconnect.
             RFU_DEBUG_LOG("Disconnect client slot %d due to timeout\n", i);
             memset(&rfu_host.clients[i], 0, sizeof(rfu_host.clients[i]));
