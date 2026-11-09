@@ -144,7 +144,10 @@ static void net_send(int from, int flags, const void *buf, size_t len, uint16_t 
   int k;
   (void)flags;
   if (from) {
-    /* A client always sends to the host, which passes it on. */
+    /* A client always sends to the host, which passes it on. NETPLAY8=1:
+     * as RetroArch netplay 8, nothing until it is a player. */
+    if (getenv("NETPLAY8") && !con[from].playing)
+      return;
     net_queue(from, 0, (uint16_t)from, client_id, buf, len);
     return;
   }
@@ -181,6 +184,12 @@ static void net_poll(int who) {
       /* The host: for itself, and/or passed on to the other clients. */
       const uint16_t dest = p->dest;
       int k;
+      /* NETPLAY8=1: a packet from a client that is not a player yet (an
+       * older client sends from start()) is dropped, as netplay 8 does. */
+      if (getenv("NETPLAY8") && !con[p->from_id].playing) {
+        free(p);
+        continue;
+      }
       if (dest == 0 || dest == RETRO_NETPACKET_BROADCAST)
         if (con[0].np_set && con[0].np.receive)
           con[0].np.receive(p->data, p->len, p->from_id);
@@ -208,8 +217,14 @@ static bool opt_changed, opt_change_pending;
 static const char *opt(int who, const char *key) {
   if (!strcmp(key, "gpsp_serial")) return getenv("SERIAL") ? getenv("SERIAL") : "mul_cable";
   /* BIOSDIR=dir: the official BIOS, dir/gba_bios.bin */
-  if (!strcmp(key, "gpsp_bios")) return getenv("BIOSDIR") ? "official" : "builtin";
-  if (!strcmp(key, "gpsp_boot_mode")) return "game";
+  /* BUILTIN0=1 (BUILTIN1...): that console uses the built-in BIOS anyway */
+  if (!strcmp(key, "gpsp_bios")) {
+    char var[16];
+    snprintf(var, sizeof(var), "BUILTIN%d", who);
+    return getenv("BIOSDIR") && !getenv(var) ? "official" : "builtin";
+  }
+  /* BOOT=bios: boot through the BIOS (Start+Select there: multiboot) */
+  if (!strcmp(key, "gpsp_boot_mode")) return getenv("BOOT") ? getenv("BOOT") : "game";
   /* (CHANGE_DRC=1: what CHANGE_AT changes is the dynarec, turned off) */
   if (!strcmp(key, "gpsp_drc"))
     return who == 0 && opt_changed && getenv("CHANGE_DRC") ? "disabled" : "enabled";

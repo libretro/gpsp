@@ -127,7 +127,7 @@ bool dual_cable_pending(void);
 
 #define NET_CABLE_HEADER       0x4d434236   // MCB6 (Multiplayer CaBle, v6)
 
-#define PKT_STATUS             1    // a: status flags
+#define PKT_STATUS             1    // a: status flags, b: STB_* flags
 #define PKT_XFER               2    // a: data, b: transfer config, c: parent clock
 #define PKT_REPLY              3    // a: data, b: transfer mode (multiplayer only)
 #define PKT_DONE               4    // a: words 0/1, b: words 2/3, c: parent clock
@@ -138,6 +138,9 @@ bool dual_cable_pending(void);
 #define ST_SO                  0x2  // SO line level (normal mode)
 #define ST_ALLREADY            0x4  // Parent only: every console is in multiplayer mode
 #define ST_UNKNOWN             0xFF
+
+// Status "b" field
+#define STB_ASK                0x1  // Parent: every child, send your status again
 
 // Tick flags
 #define TICK_ACTIVE            0x1  // The link is in use, keep up with the parent
@@ -161,6 +164,7 @@ bool dual_cable_pending(void);
 #define CBL_AHEAD_MARGIN       256       // ...and how much further we go, just in case
 #define CBL_EARLY_STREAK       512       // Well behaved transfers it takes to send words early
 #define CBL_MAX_LAG_CYCLES     CBL_FRAME_CYCLES   // A child that fell behind does not owe more than this
+#define CBL_STATUS_EVERY       60        // Frames between two status reports, changed or not
 
 // Host-time limits for the blocking waits (microseconds).
 // Giving up on a word means the game gets a console that is not there, which
@@ -205,6 +209,8 @@ static struct {
   } peer[4];
 
   u8 status_sent;                // Last status we reported
+  u8 status_frames;              // Frames since we last reported it
+  u8 status_ask;                 // Parent: ask the children for theirs
   u8 so_out;                     // Normal mode SO level (latched during transfers)
   u8 link_dirty;                 // Line levels might have changed
   u32 clock;                     // Emulated time
@@ -307,7 +313,10 @@ static void cable_sync_status(void) {
   u8 flags = own_status();
   if (flags != cbl.status_sent && cable_plugged()) {
     cbl.status_sent = flags;
-    cable_send(RETRO_NETPACKET_BROADCAST, PKT_STATUS, 0, flags, 0, 0);
+    cable_send(RETRO_NETPACKET_BROADCAST, PKT_STATUS, 0, flags,
+               cbl.status_ask ? STB_ASK : 0, 0);
+    cbl.status_ask = 0;
+    cbl.status_frames = 0;
   }
 }
 
@@ -390,6 +399,17 @@ void serialcable_replug(void) {
 void serialcable_session_reset(void) {
   memset(&cbl, 0, sizeof(cbl));
   serialcable_reset();
+}
+
+// Parent: the frontend took a console in as a player. What it sent before
+// may have been dropped: ask everybody for their status again.
+void serialcable_peer_connected(uint16_t client_id) {
+  (void)client_id;
+  if (!ME) {
+    cbl.status_ask = 1;
+    cbl.status_sent = ST_UNKNOWN;
+    cbl.link_dirty = 1;
+  }
 }
 
 void serialcable_peer_disconnected(uint16_t client_id) {
@@ -989,6 +1009,17 @@ static bool child_update(unsigned cycles) {
 
 // The frontend wants a frame.
 void serialcable_frame_start(void) {
+  // Our status goes out again now and then, changed or not. A frontend may
+  // drop what a client sends before it is a player (RetroArch netplay 8
+  // does, and the core is started before the promotion): sent only when it
+  // changes, it could be lost for good, and with it our end of the cable
+  // (the parent would go on without us: a BIOS waiting for a multiboot
+  // that never answers, games that never see the other console).
+  if (cable_plugged() && ++cbl.status_frames >= CBL_STATUS_EVERY) {
+    cbl.status_frames = 0;
+    cbl.status_sent = ST_UNKNOWN;
+    cbl.link_dirty = 1;
+  }
   cbl.f_entry = netpacket_time_usec();
   cbl.f_stayed = 0;
 }
@@ -1147,6 +1178,13 @@ void serialcable_net_receive(const void* buf, size_t len, uint16_t client_id) {
       cbl.peer[client_id].present = 1;
       cbl.peer[client_id].responsive = 1;
       cbl.status_sent = ST_UNKNOWN;
+      cbl.link_dirty = 1;
+    }
+    // The parent asks for our status (it just took us in as a player, see
+    // serialcable_peer_connected): what we sent before may be lost.
+    if (ME && client_id == 0 && (b & STB_ASK)) {
+      cbl.status_sent = ST_UNKNOWN;
+      cbl.link_dirty = 1;
     }
     cbl.peer[client_id].flags = a;
     cbl.link_dirty = 1;

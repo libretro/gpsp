@@ -105,6 +105,27 @@ While linked, savestates cannot be loaded, cheats are off and fast forward
 is disabled: all of them would make the copies of a GBA different. When a
 console leaves, each player's GBA carries on alone.
 
+## Different games, and programs sent through the cable
+
+Two different games (Metroid Zero Mission and Metroid Fusion, Ruby and
+Sapphire...) play over the real time cable. Some of them send a program
+to the other GBA with the BIOS (MultiBoot): Zero Mission's Fusion link
+sends one to a Fusion console started with **Start+Select held** while the
+BIOS boots (boot mode **Boot to BIOS**), and single cartridge multiplayer
+works the same way.
+
+The built-in BIOS does this too now (`bios/multiboot`: SWI 25h, the sender,
+and the Start+Select boot, the receiver, in the free end of the built-in
+BIOS, patched in when it is loaded), word for word as the official BIOS
+does it on the cable, so any mix of consoles with `gba_bios.bin` and
+without it works. Before, a console on the built-in BIOS never sent the
+program (its game waited for ever, "Linking...") and never took one (it
+started its own cartridge), and the other console sat in its BIOS waiting.
+
+A console that is a client of the netplay session also sends its cable
+status again now and then: RetroArch netplay 8 drops what a client sends
+before it is a player, and the host would otherwise go on without it.
+
 ## Code
 
 | file | what |
@@ -154,7 +175,9 @@ their packets on, as RetroArch does), on the real arm32 build under
 Arguments: ROM, frames, one-way latency (ms), frames each player plays alone
 first. `PLAYERS=n` sets the consoles and their players option (`PLAYERS1=n`
 gives console 1 another value), `JOIN_GAP=n` the frames between two clients
-joining, `LATE_CONNECT=n` the frames the host hears about each client late.
+joining, `LATE_CONNECT=n` the frames the host hears about each client late,
+`NETPLAY8=1` drops what a client sends before it is a player (as RetroArch
+netplay 8 does; with `LATE_CONNECT` that is a promotion n frames late).
 
 `PACE=1` runs each console on its own thread at 59.73 frames a second and
 prints how long the setup took, how far apart the screens are and how many
@@ -174,7 +197,9 @@ whose cable prints what it does; `DUAL_FAULT=1` with it gives a hidden GBA
 other buttons once, to check that the agreement check catches it.
 `SERIAL=auto` (or any other value of the option) changes the link mode,
 `ROM2=...` gives client 1 another game (the real time cable must take over).
-`BIOSDIR=dir` uses the official BIOS (`dir/gba_bios.bin`), `SAV0=file`
+`BIOSDIR=dir` uses the official BIOS (`dir/gba_bios.bin`; `BUILTIN1=1` keeps
+console 1 on the built-in one), `BOOT=bios` boots
+through it (hold Start+Select there with `KEYS1` to boot multiboot), `SAV0=file`
 (`SAV1`...) loads a console's save memory and `SAVEOUT=dir` writes them
 at the end.
 

@@ -707,6 +707,8 @@ static bool netpacket_connected(uint16_t client_id) {
 #endif
 
   netplay_num_clients++;
+  if (serial_mode == SERIAL_MODE_SERIAL_CABLE)
+    serialcable_peer_connected(client_id);
   return true;
 }
 
@@ -1449,6 +1451,34 @@ static void set_memory_descriptors(void)
    environ_cb(RETRO_ENVIRONMENT_SET_MEMORY_MAPS, &retromap);
 }
 
+#include "bios_patch.h"
+
+/* The built-in BIOS, with what it lacks for the link cable
+ * (bios/multiboot): SWI 25h (MultiBoot), which sends a program to the other
+ * GBAs, and taking one at boot with Start+Select held. Without them a game
+ * sending one (Metroid Zero Mission to Metroid Fusion, single cartridge
+ * multiplayer) waited for ever, and so did the other console, in its BIOS.
+ * The block goes in the free end of the BIOS, the SWI 25h entry of its
+ * branch table (0xB0 + 0x25 * 4) points at it, and so does the boot. */
+static void load_builtin_bios(void)
+{
+   const u32 entry = BIOS_MULTIBOOT_ENTRY;
+   memcpy(bios_rom, open_gba_bios_rom, sizeof(bios_rom));
+   memcpy(bios_rom + BIOS_MULTIBOOT_ADDR, bios_multiboot_block,
+          sizeof(bios_multiboot_block));
+   bios_rom[0xB0 + 0x25 * 4 + 0] = entry & 0xFF;
+   bios_rom[0xB0 + 0x25 * 4 + 1] = (entry >> 8) & 0xFF;
+   bios_rom[0xB0 + 0x25 * 4 + 2] = (entry >> 16) & 0xFF;
+   bios_rom[0xB0 + 0x25 * 4 + 3] = (entry >> 24) & 0xFF;
+   /* The boot goes on through bios_BootHook (the literal reset_vector
+    * loads swi_SoftReset from): with Start+Select held it takes a program
+    * from the cable, as the official BIOS does. */
+   bios_rom[0x164 + 0] = BIOS_BOOTHOOK_ENTRY & 0xFF;
+   bios_rom[0x164 + 1] = (BIOS_BOOTHOOK_ENTRY >> 8) & 0xFF;
+   bios_rom[0x164 + 2] = 0;
+   bios_rom[0x164 + 3] = 0;
+}
+
 bool retro_load_game(const struct retro_game_info* info)
 {
    if (!info || !info->path)
@@ -1524,7 +1554,7 @@ bool retro_load_game(const struct retro_game_info* info)
 
    if (!bios_loaded) {
      /* Load the built-in BIOS */
-     memcpy(bios_rom, open_gba_bios_rom, sizeof(bios_rom));
+     load_builtin_bios();
    }
 
    memset(gamepak_backup, 0xff, sizeof(gamepak_backup));
@@ -1537,7 +1567,7 @@ bool retro_load_game(const struct retro_game_info* info)
    if (selected_bios != builtin_bios && gamepak_header_nonstandard)
    {
       show_warning_message("Non-standard ROM header detected, using built-in BIOS", 2500);
-      memcpy(bios_rom, open_gba_bios_rom, sizeof(bios_rom));
+      load_builtin_bios();
    }
 
    extern bool require_m1_hle_bios;
@@ -1545,7 +1575,7 @@ bool retro_load_game(const struct retro_game_info* info)
    if (selected_bios != builtin_bios && require_m1_hle_bios)
    {
       show_warning_message("Pokemon ROM Hack (M1) detected, forcing built-in BIOS", 2500);
-      memcpy(bios_rom, open_gba_bios_rom, sizeof(bios_rom));
+      load_builtin_bios();
    }
 
 #ifdef GPSP_INSTANCE_B

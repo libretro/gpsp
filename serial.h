@@ -66,6 +66,7 @@ void serialaw_net_receive(const void* buf, size_t len, uint16_t client_id);
 void serialcable_reset(void);
 void serialcable_session_reset(void);
 void serialcable_replug(void);
+void serialcable_peer_connected(uint16_t client_id);
 void serialcable_peer_disconnected(uint16_t client_id);
 void serialcable_mode_changed(void);
 u16 serialcable_mul_siocnt(void);
