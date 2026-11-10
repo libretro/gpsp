@@ -72,7 +72,7 @@ void serialcable_mode_changed(void);
 u16 serialcable_mul_siocnt(void);
 u16 serialcable_normal_write(u16 oldval, u16 newval);
 u16 serialcable_multi_write(u16 oldval, u16 newval);
-void serialcable_send_written(u16 oldval);
+void serialcable_send_written(u16 oldval, u16 newval);
 void serialcable_frame_start(void);
 bool serialcable_frame_end(void);
 u32 serialcable_next_event(void);

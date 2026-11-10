@@ -13,6 +13,11 @@
  * Environment: PLAYERS=n (2-4) consoles, and the "Cable Link players"
  * option of all of them (PLAYERS1=n gives console 1 another value).
  * JOIN_GAP=n: frames between one client joining and the next.
+ * CORE1=file: client 1 runs that build of the core instead (two versions
+ * of the link that meet).
+ * NET=listen:PORT or NET=IP:PORT (needs PACE=1): only one console here, the
+ * host or the client, and the other one in another process (another device)
+ * over TCP, to measure the cable on a real network.
  * PACE=1 runs each console at 59.73 frames a second, as on the real ones
  * (SKEW_PPM=n: the clients' clocks are n parts per million faster, client k
  * k times), BW_KBPS=n gives the network that bandwidth each way, JITTER_MS=n
@@ -52,6 +57,10 @@
 #include <string.h>
 #include <time.h>
 #include <unistd.h>
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <netinet/tcp.h>
+#include <arpa/inet.h>
 #include "libretro.h"
 
 #define MAXCON 4
@@ -106,6 +115,20 @@ typedef struct pkt {
 static pkt *q_head, *q_tail;
 static pthread_mutex_t q_mtx = PTHREAD_MUTEX_INITIALIZER;
 
+/* NET: the other console is in another process, over TCP. */
+static int net_fd = -1, local = -1;
+#define LOCAL(i) (net_fd < 0 || (i) == local)
+
+static bool read_all(int fd, void *buf, size_t len) {
+  unsigned char *b = buf;
+  while (len) {
+    ssize_t n = recv(fd, b, len, 0);
+    if (n <= 0) return false;
+    b += n; len -= (size_t)n;
+  }
+  return true;
+}
+
 static int64_t now_us(void) {
   struct timespec ts;
   clock_gettime(CLOCK_MONOTONIC, &ts);
@@ -143,6 +166,20 @@ static void net_queue(int link, int to, uint16_t from_id, uint16_t dest,
 static void net_send(int from, int flags, const void *buf, size_t len, uint16_t client_id) {
   int k;
   (void)flags;
+  if (net_fd >= 0) {
+    /* Frame: length, who sent it, who it is for, then the packet. */
+    unsigned char hdr[8];
+    const uint32_t l = (uint32_t)len;
+    const uint16_t f = (uint16_t)from;
+    if (!from && !con[1].playing) return;
+    memcpy(hdr, &l, 4); memcpy(hdr + 4, &f, 2); memcpy(hdr + 6, &client_id, 2);
+    pthread_mutex_lock(&q_mtx);
+    if (send(net_fd, hdr, 8, MSG_NOSIGNAL) != 8 ||
+        send(net_fd, buf, len, MSG_NOSIGNAL) != (ssize_t)len)
+      con[local].bad = true;
+    pthread_mutex_unlock(&q_mtx);
+    return;
+  }
   if (from) {
     /* A client always sends to the host, which passes it on. NETPLAY8=1:
      * as RetroArch netplay 8, nothing until it is a player. */
@@ -204,6 +241,80 @@ static void net_poll(int who) {
   }
 }
 
+/* NET: what comes from the other device goes in the queue, delivered at
+ * once, to be taken by net_poll like the packets of the network in memory. */
+static void *net_reader(void *arg) {
+  (void)arg;
+  for (;;) {
+    unsigned char hdr[8];
+    uint32_t l;
+    uint16_t f, d;
+    pkt *p;
+    if (!read_all(net_fd, hdr, 8)) break;
+    memcpy(&l, hdr, 4); memcpy(&f, hdr + 4, 2); memcpy(&d, hdr + 6, 2);
+    if (f == 0xFFFF) continue;     /* KEEPALIVE */
+    p = malloc(sizeof(pkt) + l);
+    if (!read_all(net_fd, p->data, l)) { free(p); break; }
+    p->next = NULL; p->at = 0; p->to = local;
+    p->from_id = f; p->dest = d; p->len = l;
+    pthread_mutex_lock(&q_mtx);
+    if (q_tail) q_tail->next = p; else q_head = p;
+    q_tail = p;
+    pthread_mutex_unlock(&q_mtx);
+  }
+  printf("NET: the other device left\n");
+  return NULL;
+}
+
+/* KEEPALIVE_US=n: an empty frame every n us (keeps the WiFi awake?) */
+static void *net_keepalive(void *arg) {
+  const unsigned us = (unsigned)atoi(getenv("KEEPALIVE_US"));
+  unsigned char hdr[8] = { 0, 0, 0, 0, 0xFF, 0xFF, 0, 0 };
+  (void)arg;
+  for (;;) {
+    usleep(us);
+    pthread_mutex_lock(&q_mtx);
+    if (send(net_fd, hdr, 8, MSG_NOSIGNAL) != 8) { pthread_mutex_unlock(&q_mtx); break; }
+    pthread_mutex_unlock(&q_mtx);
+  }
+  return NULL;
+}
+
+static bool net_open(const char *spec) {
+  struct sockaddr_in a;
+  int one = 1, fd;
+  pthread_t th;
+  const char *colon = strrchr(spec, ':');
+  if (!colon) return false;
+  memset(&a, 0, sizeof(a));
+  a.sin_family = AF_INET;
+  a.sin_port = htons((uint16_t)atoi(colon + 1));
+  fd = socket(AF_INET, SOCK_STREAM, 0);
+  if (!strncmp(spec, "listen:", 7)) {
+    int l = fd;
+    setsockopt(l, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one));
+    if (bind(l, (struct sockaddr *)&a, sizeof(a)) || listen(l, 1)) return false;
+    printf("NET: waiting for the client on port %d\n", atoi(colon + 1));
+    fd = accept(l, NULL, NULL);
+    close(l);
+  }
+  else {
+    char host[64];
+    int tries;
+    snprintf(host, sizeof(host), "%.*s", (int)(colon - spec), spec);
+    inet_pton(AF_INET, host, &a.sin_addr);
+    for (tries = 0; connect(fd, (struct sockaddr *)&a, sizeof(a)) && tries < 600; tries++) {
+      close(fd); usleep(100000); fd = socket(AF_INET, SOCK_STREAM, 0);
+    }
+  }
+  if (fd < 0) return false;
+  setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one));
+  net_fd = fd;
+  printf("NET: connected\n");
+  if (getenv("KEEPALIVE_US")) pthread_create(&th, NULL, net_keepalive, NULL);
+  return pthread_create(&th, NULL, net_reader, NULL) == 0;
+}
+
 /* ---- frontend callbacks, one set per console ---- */
 
 /* HOST_PLAYERS_BEFORE=n: the players option the host had before the netplay
@@ -234,6 +345,8 @@ static const char *opt(int who, const char *key) {
   if (!strcmp(key, "gpsp_sound_rate") && who == 0 && opt_changed && !getenv("CHANGE_DRC")) return "32768";
   /* SOUND=32768: the sound rate of every console */
   if (!strcmp(key, "gpsp_sound_rate") && getenv("SOUND")) return getenv("SOUND");
+  /* OTHER=dual: different games go on the dual cable (they are looked for) */
+  if (!strcmp(key, "gpsp_cable_different_games")) return getenv("OTHER") ? "auto" : "realtime";
   if (!strcmp(key, "gpsp_cable_players")) {
     if (who == 0 && !opt_netplay && getenv("HOST_PLAYERS_BEFORE")) return getenv("HOST_PLAYERS_BEFORE");
     if (who == 1 && getenv("PLAYERS1")) return getenv("PLAYERS1");
@@ -517,7 +630,7 @@ static uint32_t script_keys(int who, unsigned frame) {
 static bool all_done(unsigned frames) {
   int i;
   for (i = 0; i < ncon; i++)
-    if (con[i].frames_shown < frames)
+    if (LOCAL(i) && con[i].frames_shown < frames)
       return false;
   return true;
 }
@@ -567,6 +680,13 @@ static void *pace_main(void *arg) {
     if (next > t) usleep((useconds_t)(next - t));
     con[i].keys = script_keys(i, con[i].frames_shown);
     net_poll(i);
+    /* LINKLOG_RESET=n: the link test ROM's log starts over at frame n of
+     * each console (the host's fills up before the clients are there). */
+    if (getenv("LINKLOG_RESET") &&
+        con[i].frames_shown == (unsigned)atoi(getenv("LINKLOG_RESET"))) {
+      uint32_t *m = con[i].get_memory_data(RETRO_MEMORY_SYSTEM_RAM);
+      if (m) m[0] = 0;
+    }
     con[i].run();
     t = now_us();
     pace.t_last[i] = t;
@@ -635,18 +755,28 @@ int main(int argc, char **argv) {
   solo = argc > 5 ? (unsigned)atoi(argv[5]) : 30;
   if (getenv("PLAYERS")) ncon = atoi(getenv("PLAYERS"));
   if (ncon < 2 || ncon > MAXCON) { fprintf(stderr, "PLAYERS: 2 to 4\n"); return 2; }
+  if (getenv("NET")) {
+    if (!getenv("PACE")) { fprintf(stderr, "NET needs PACE=1\n"); return 2; }
+    ncon = 2;
+    local = strncmp(getenv("NET"), "listen:", 7) ? 1 : 0;
+  }
 
   /* One file each: dlopen gives each its own globals. */
   for (i = 0; i < ncon; i++) {
+    copy[i][0] = 0;
+    if (local >= 0 && i != local) continue;
     snprintf(copy[i], sizeof(copy[i]), "%s/dualtest_core%d_%d.so",
              getenv("TMPDIR") ? getenv("TMPDIR") : "/tmp", i, (int)getpid());
-    if (!copy_file(core, copy[i])) { fprintf(stderr, "cannot copy the core\n"); return 2; }
+    /* CORE1 in the environment: client 1 runs another build of the core. */
+    if (!copy_file(i == 1 && getenv("CORE1") ? getenv("CORE1") : core, copy[i])) {
+      fprintf(stderr, "cannot copy the core\n"); return 2;
+    }
     printf("console %d: loading core\n", i);
     load_core(&con[i], copy[i], i);
     printf("console %d: loading game\n", i);
     memset(&info, 0, sizeof(info));
     /* ROM2 in the environment: client 1 has another game. */
-    info.path = (i == 1 && getenv("ROM2")) ? getenv("ROM2") : rom;
+    info.path = (i == 1 && getenv("ROM2") && local < 0) ? getenv("ROM2") : rom;
     if (!con[i].load_game(&info)) { fprintf(stderr, "load_game failed\n"); return 2; }
     if (!con[i].np_set) { fprintf(stderr, "no netpacket interface\n"); return 2; }
     /* SAVn=file: its save memory, loaded as RetroArch does. */
@@ -667,7 +797,7 @@ int main(int argc, char **argv) {
 
   /* Each player plays alone for a while, so that the GBAs differ. */
   for (f = 0; f < solo; f++)
-    for (i = 0; i < ncon; i++) {
+    for (i = 0; i < ncon; i++) if (LOCAL(i)) {
       con[i].keys = script_keys(i, f + 1000 * i);
       con[i].run();
     }
@@ -693,6 +823,18 @@ int main(int argc, char **argv) {
     const unsigned late = getenv("LATE_CONNECT") ? (unsigned)atoi(getenv("LATE_CONNECT")) : 0;
     int64_t ts = now_us();
     opt_netplay = true;   /* (no frame runs before the session starts) */
+    if (local >= 0) {
+      if (!net_open(getenv("NET"))) { fprintf(stderr, "NET: cannot connect\n"); return 2; }
+      con[1].playing = true;
+      con[local].np.start((unsigned)local, np_sends[local], np_polls[local]);
+      con[local].started = true;
+      if (!local && con[0].np.connected && !con[0].np.connected(1)) {
+        fprintf(stderr, "host refused the client\n");
+        return 2;
+      }
+      printf("session start took %.0f ms\n", (now_us() - ts) / 1e3);
+    }
+    else {
     con[0].np.start(0, np_sends[0], np_polls[0]);
     con[0].started = true;
     printf("host session start took %.0f ms\n", (now_us() - ts) / 1e3);
@@ -718,6 +860,7 @@ int main(int argc, char **argv) {
         return 2;
       }
     }
+    }
   }
 
   for (i = 0; i < ncon; i++)
@@ -735,9 +878,9 @@ int main(int argc, char **argv) {
       pace.diff_max[i] = -1e9;
     }
     for (i = 0; i < ncon; i++)
-      pthread_create(&th[i], NULL, pace_main, (void *)(intptr_t)i);
+      if (LOCAL(i)) pthread_create(&th[i], NULL, pace_main, (void *)(intptr_t)i);
     for (i = 0; i < ncon; i++)
-      pthread_join(th[i], NULL);
+      if (LOCAL(i)) pthread_join(th[i], NULL);
     print_session(pace.t0);
     printf("setup: plays after");
     for (i = 0; i < ncon; i++)
@@ -789,6 +932,20 @@ int main(int argc, char **argv) {
   if (any_bad() || !all_done(frames))
     ok = 0;
 
+  /* LINKLOG=dir: the link test ROM's log of each console (dir/cN.link: the
+   * count, then the words), to compare them however they line up. */
+  if (getenv("LINKLOG"))
+    for (i = 0; i < ncon; i++) if (LOCAL(i)) {
+      const uint32_t *m = con[i].get_memory_data(RETRO_MEMORY_SYSTEM_RAM);
+      char path[512];
+      FILE *fp;
+      snprintf(path, sizeof(path), "%s/c%d.link", getenv("LINKLOG"), i);
+      if (m && m[0] <= 0xFFF0 && (fp = fopen(path, "wb"))) {
+        fwrite(m, 4, 4 + (m[0] < 8192 ? m[0] : 8192), fp);
+        fclose(fp);
+      }
+    }
+
   /* Link test ROM: every GBA must have logged the same words, two log
    * entries per transfer: the parent's and first child's words, then the
    * other two. Each player's word must be there (FFFF where nobody is). */
@@ -796,7 +953,7 @@ int main(int argc, char **argv) {
     const uint32_t *e[MAXCON];
     bool lt = true;
     for (i = 0; i < ncon; i++) {
-      e[i] = con[i].get_memory_data(RETRO_MEMORY_SYSTEM_RAM);
+      e[i] = LOCAL(i) ? con[i].get_memory_data(RETRO_MEMORY_SYSTEM_RAM) : NULL;
       if (!e[i] || e[i][2] < 1 || e[i][2] > 4)
         lt = false;
     }
@@ -862,14 +1019,14 @@ int main(int argc, char **argv) {
 
   /* SAVEOUT=dir: each console's save memory, as dir/cN.sav. */
   if (getenv("SAVEOUT"))
-    for (i = 0; i < ncon; i++) {
+    for (i = 0; i < ncon; i++) if (LOCAL(i)) {
       char path[512];
       const unsigned char *m = con[i].get_memory_data(RETRO_MEMORY_SAVE_RAM);
       FILE *fp;
       snprintf(path, sizeof(path), "%s/c%d.sav", getenv("SAVEOUT"), i);
       if (m && (fp = fopen(path, "wb"))) { fwrite(m, 1, 1024 * 128, fp); fclose(fp); }
     }
-  for (i = 0; i < ncon; i++) {
+  for (i = 0; i < ncon; i++) if (LOCAL(i)) {
     if (con[i].np_set && con[i].np.stop) con[i].np.stop();
     con[i].unload_game();
     con[i].deinit();

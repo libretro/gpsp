@@ -87,6 +87,7 @@ void dual_set_frontend(retro_environment_t cb,
                        void (*message)(const char *text, unsigned ms));
 void dual_game_loaded(const char *path, uint32_t cfg);
 void dual_set_players(unsigned players);
+void dual_set_other_games(bool on);
 void dual_set_cfg(uint32_t cfg);
 void dual_session_start(unsigned client_id);
 bool dual_peer_connected(unsigned client_id);

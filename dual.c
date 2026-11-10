@@ -51,14 +51,30 @@
 // (and the speakers) go together: each one tells the others how far ahead of
 // each it thinks it is, and one that is ahead waits a frame now and then.
 
+// (64 bit directory offsets and file sizes on a 32 bit CPU: ext4 and others
+// give offsets readdir cannot return otherwise, and it fails right away.)
+#define _FILE_OFFSET_BITS 64
+#include <ctype.h>
 #include <pthread.h>
 #include <semaphore.h>
 #include <sched.h>
 #include <unistd.h>
+#include <errno.h>
+#include <time.h>
 #include "common.h"
 #include "dual.h"
 #include "libretro.h"
 #include <streams/file_stream.h>
+#if defined(__unix__) || defined(__linux__) || defined(__APPLE__) || defined(ANDROID)
+  #include <dirent.h>
+  #include <sys/stat.h>
+  #define DUAL_HAVE_DIRS 1
+#endif
+
+// Instance A (libretro.c, gba_memory.c).
+u32 dual_machine_cfg(void);
+u32 dual_machine_opts(void);
+void dual_set_bios(const u8 *src);
 
 /* ---- hidden instances (the same core, globals renamed) ------------------- */
 
@@ -82,6 +98,13 @@
   void p##reset_gba(void);                                                  \
   void p##rtc_dual_begin(bool owner);                                       \
   void p##rtc_dual_end(void);                                               \
+  u32 p##dual_machine_cfg(void);                                            \
+  void p##dual_set_bios(const u8 *src);                                     \
+  bool p##gamepak_must_swap(void);                                          \
+  extern u8 *p##gamepak_buffers[];                                          \
+  extern u32 p##gamepak_file_blocks;                                        \
+  extern bool p##gamepak_mini_materialized;                                 \
+  extern u8 p##bios_rom[];                                                  \
   extern int p##serial_mode;                                                \
   extern u8 p##ewram[], p##iwram[], p##vram[];                              \
   extern u16 p##oam_ram[], p##palette_ram[], p##io_registers[];             \
@@ -111,6 +134,13 @@ typedef struct {
   void (*reset)(void);
   void (*rtc_begin)(bool owner);
   void (*rtc_end)(void);
+  u32 (*machine_cfg)(void);
+  void (*set_bios)(const u8 *src);
+  bool (*must_swap)(void);
+  u8 **rom_buffers;
+  u32 *rom_blocks;
+  bool *rom_mini;
+  u8 *bios;
   int *serial_mode;
   u8 *ewram, *iwram, *vram;
   u16 *oam, *palette, *io;
@@ -124,7 +154,10 @@ typedef struct {
     p##retro_deinit, p##retro_load_game, p##retro_unload_game,              \
     p##retro_run, p##retro_unserialize, p##retro_get_memory_data,           \
     p##dualport_begin, p##dualport_end, p##dualport_set_keys,               \
-    p##reset_gba, p##rtc_dual_begin, p##rtc_dual_end, &p##serial_mode,      \
+    p##reset_gba, p##rtc_dual_begin, p##rtc_dual_end,                       \
+    p##dual_machine_cfg, p##dual_set_bios, p##gamepak_must_swap,            \
+    p##gamepak_buffers, &p##gamepak_file_blocks,                            \
+    &p##gamepak_mini_materialized, p##bios_rom, &p##serial_mode,            \
     p##ewram, p##iwram, p##vram, p##oam_ram, p##palette_ram,                \
     p##io_registers, p##reg }
 
@@ -144,10 +177,11 @@ static int *const hid_dynarec[DUAL_HIDDEN] = {
 /* ---- protocol ------------------------------------------------------------- */
 
 #define DUAL_HEADER        0x4d434431   // MCD1 (Multiplayer Cable, Dual)
-#define DUAL_VERSION       5
+#define DUAL_VERSION       7
 
 // Packets: header, type | sender's slot << 8 (FF: none yet), words, data.
-#define DPK_HELLO          1   // version, rom, bios, settings, players, host
+#define DPK_HELLO          1   // version, rom, bios, settings, players, host,
+                               // options, rom size, game code, rom key; name
 #define DPK_PING           2   // time
 #define DPK_PONG           3   // time (echoed)
 #define DPK_STATE          4   // offset, total (coded) size, data
@@ -157,9 +191,21 @@ static int *const hid_dynarec[DUAL_HIDDEN] = {
 #define DPK_HASH           7   // frame, hash of each slot's GBA
 #define DPK_BYE            8
 #define DPK_WAITING        9   // players so far, players wanted
-#define DPK_START          10  // players, client id of each slot
+#define DPK_START          10  // players, client id of each slot, flags,
+                               // each slot's game and settings; names
 #define DPK_GO             11  // the states can go
-#define DPK_GIVEUP         12  // use the real time cable (1: players differ)
+#define DPK_GIVEUP         12  // use the real time cable (DUAL_WHY_*)
+#define DPK_ROMOK          13  // the other GBAs are loaded (0), or DUAL_WHY_*
+
+// Why the real time cable is used instead.
+#define DUAL_WHY_DIFFER    0
+#define DUAL_WHY_PLAYERS   1
+#define DUAL_WHY_NOROM     2   // a console does not have another's game
+#define DUAL_WHY_MEMORY    3   // ...or no room for it
+#define DUAL_WHY_OTHER     4   // other games, and the host does not look for them
+
+#define DUAL_START_BUILTIN 0x1 // START flags: the BIOS differ, all use the built-in one
+#define DUAL_START_OTHER   0x2 // ...the games differ: each console loads the others' games
 
 #define DUAL_NO_SLOT       0xFF
 #define DUAL_CHUNK         (16 * 1024)
@@ -189,8 +235,32 @@ static int *const hid_dynarec[DUAL_HIDDEN] = {
 
 #define DUAL_MSG_DIFFER  "Cable Link: games or settings differ, using the real time cable"
 #define DUAL_MSG_PLAYERS "Cable Link: the consoles have a different number of players, using the real time cable"
+#define DUAL_MSG_NOROM   "Cable Link: a console does not have the other game, using the real time cable"
+#define DUAL_MSG_MEMORY  "Cable Link: not enough memory for the other game, using the real time cable"
+#define DUAL_MSG_OTHER   "Cable Link: different games, using the real time cable"
+// (Neither cable works between two versions: same words as serial_cable.c.)
+#define DUAL_MSG_VERSION "Cable Link: the other console has another version of this core"
 
-enum { DS_OFF = 0, DS_HELLO, DS_WAIT, DS_PING, DS_TRANSFER, DS_READY, DS_RUN };
+// A game, as the consoles tell each other: what it is (hash of the whole
+// ROM, as dual_rom_crc), what finds it fast on the other consoles (file size,
+// header, a hash of its first and last 32 KB) and how its owner runs it.
+#define DUAL_NAME_MAX      128
+typedef struct {
+  u32 hash, size, code, key, quick;
+  u32 opts, cfg, bios;
+  char name[DUAL_NAME_MAX];     // File name (no folder): tried first
+} dual_rom;
+
+#define DUAL_ROM_WORDS     8    // (the words of a dual_rom, then its name)
+#define DUAL_IDS           64   // Client ids whose HELLO is kept
+// Free memory a game of another console must leave (MemAvailable), on top
+// of its size: the frontend and the system need some too (a Miyoo Mini Plus
+// has 128 MB in all).
+#define DUAL_MEM_MARGIN    (12 * 1024 * 1024)
+#define DUAL_FIND_MAX      8    // Files with the right header tried at most
+#define DUAL_ROM_INDEX     "gpsp_plus_roms.txt"   // (system folder)
+
+enum { DS_OFF = 0, DS_HELLO, DS_WAIT, DS_ROMS, DS_PING, DS_TRANSFER, DS_READY, DS_RUN };
 
 #define NP DUAL_MAX_PLAYERS
 
@@ -204,10 +274,14 @@ static struct {
   u32 cfg;                      // Settings that change the machine
   unsigned players;             // GBAs on the cable in this session
   unsigned cfg_players;         // Core option (for the next session)
+  bool other_games;             // Core option: dual cable with other games
 
   // Hidden instances
   struct {
     bool loaded;
+    bool shared;                // Reads the ROM from ours (same game)
+    u32 opts;                   // Options it was loaded with
+    char path[1024];            // Its game
     bool th_ok;
     pthread_t th;
     sem_t start, done;
@@ -236,6 +310,16 @@ static struct {
   // Host: clients whose HELLO came (and matched) before the frontend told us
   // they joined (RetroArch starts a client's session first). Bit = id.
   u64 early_hello;
+
+  // The games: ours, what each client said in its HELLO (by client id; host),
+  // and each slot's in this session (from START)
+  dual_rom own;
+  dual_rom id_rom[DUAL_IDS];
+  dual_rom slot_rom[NP];
+  u32 start_flags;
+  bool roms_done;               // Our hidden GBAs are ready for the session
+  u32 roms_ok;                  // Host: slots whose hidden GBAs are (bit)
+  bool bios_swapped;            // Ours went built-in for a session
 
   // Client, before START
   bool hello_sent, hello_rcvd;
@@ -311,8 +395,8 @@ static u32 dual_crc32(u32 crc, const void *data, size_t len) {
 // To one console (libretro client id) or RETRO_NETPACKET_BROADCAST.
 static void dual_send(unsigned to, u32 type, const u32 *words, u32 nwords,
                       const void *data, u32 len) {
-  u8 buf[8 + 16 * 4 + DUAL_CHUNK];
-  u32 *hdr = (u32*)buf;
+  u32 hdr[(8 + 64 * 4 + DUAL_CHUNK) / 4];
+  u8 *const buf = (u8*)hdr;
   u32 i;
   const u32 slot = ds.n ? ds.my_slot : DUAL_NO_SLOT;
   hdr[0] = netorder32(DUAL_HEADER);
@@ -423,9 +507,26 @@ static bool bus_has_reply(unsigned from, u32 seq) {
   #define DBG(...)
 #endif
 
+// A GBA never waits long: the others are running on the other CPU cores, a
+// few thousand cycles away. If one waited for whole seconds, what it waits
+// for is not coming (it would be a bug here, or a GBA that died), and the
+// frontend would hang with it for good. The cable is cut instead: every GBA
+// goes on by itself to the end of its frame, and the session stops there
+// (dual_frame_end).
+#define DUAL_BUS_STUCK_S 5
+
+// Sleeps until woken up, a second at most (with the bus locked). Returns
+// true if nobody did.
+static bool bus_sleep(void) {
+  struct timespec ts;
+  clock_gettime(CLOCK_REALTIME, &ts);
+  ts.tv_sec += 1;
+  return pthread_cond_timedwait(&bus.cond, &bus.mtx, &ts) == ETIMEDOUT;
+}
+
 #define BUS_WAIT(ready)                                                      \
   do {                                                                      \
-    unsigned spins;                                                         \
+    unsigned spins, late = 0;                                               \
     for (spins = 0; !(ready) && !bus.abort; spins++) {                       \
       if (spins < 200)                                                      \
         sched_yield();                                                      \
@@ -435,7 +536,10 @@ static bool bus_has_reply(unsigned from, u32 seq) {
         pthread_mutex_lock(&bus.mtx);                                       \
         __atomic_add_fetch(&bus.waiters, 1, __ATOMIC_SEQ_CST);              \
         while (!(ready) && !bus.abort)                                       \
-          pthread_cond_wait(&bus.cond, &bus.mtx);                           \
+          if (bus_sleep() && ++late >= DUAL_BUS_STUCK_S) {                   \
+            bus.abort = 1;                                                  \
+            pthread_cond_broadcast(&bus.cond);                              \
+          }                                                                 \
         __atomic_sub_fetch(&bus.waiters, 1, __ATOMIC_SEQ_CST);              \
         pthread_mutex_unlock(&bus.mtx);                                     \
         break;                                                              \
@@ -464,7 +568,8 @@ void dualbus_post(unsigned from_slot, unsigned to, const dual_event *ev) {
                                            bus.qcount[to][from_slot]) % DUAL_QSIZE];
     *e = *ev;
     e->from = from_slot;
-    bus.qcount[to][from_slot]++;
+    __atomic_store_n(&bus.qcount[to][from_slot], bus.qcount[to][from_slot] + 1,
+                     __ATOMIC_SEQ_CST);
   }
   pthread_mutex_unlock(&bus.mtx);
 }
@@ -476,6 +581,16 @@ int dualbus_pop(unsigned slot, uint64_t now, dual_event *ev) {
   int best = -1;
   u64 best_due = 0;
   unsigned s;
+  // Nothing for us, as on nearly every call (each GBA gets here hundreds of
+  // times per frame): no need for the lock, which the GBAs would only fight
+  // over. Whatever is due at `now` was posted before its sender published
+  // the clock that let us get to `now` (dualbus_sync), so it is counted by
+  // the time we look; what is being posted right now is not due yet.
+  for (s = 0; s < bus.n; s++)
+    if (s != slot && __atomic_load_n(&bus.qcount[slot][s], __ATOMIC_SEQ_CST))
+      break;
+  if (s == bus.n)
+    return 0;
   pthread_mutex_lock(&bus.mtx);
   for (s = 0; s < bus.n; s++) {
     if (s != slot && bus.qcount[slot][s]) {
@@ -490,7 +605,8 @@ int dualbus_pop(unsigned slot, uint64_t now, dual_event *ev) {
   if (best >= 0) {
     *ev = bus.q[slot][best][bus.qhead[slot][best]];
     bus.qhead[slot][best] = (bus.qhead[slot][best] + 1) % DUAL_QSIZE;
-    bus.qcount[slot][best]--;
+    __atomic_store_n(&bus.qcount[slot][best], bus.qcount[slot][best] - 1,
+                     __ATOMIC_SEQ_CST);
   }
   pthread_mutex_unlock(&bus.mtx);
   return best >= 0;
@@ -519,13 +635,41 @@ int dualbus_wait_reply(unsigned slot, unsigned from_slot, uint32_t seq,
 
 /* ---- hidden instances ----------------------------------------------------- */
 
+// What the hidden GBA being loaded gets: the options of the console whose
+// GBA it is a copy of (dual_machine_opts), and whether it takes the ROM from
+// ours (dual_rom_block).
+static u32 b_opts;
+static bool b_share;
+
+// The options that make a GBA another machine, as its owner has them.
+static const char *b_option(const char *key) {
+  static const char *const feat[4] = { "auto", "disabled", "enabled", "auto" };
+  if (!strcmp(key, "gpsp_drc"))
+    return (b_opts & 1) ? "enabled" : "disabled";
+  if (!strcmp(key, "gpsp_rtc"))
+    return feat[(b_opts >> 1) & 3];
+  if (!strcmp(key, "gpsp_rumble"))
+    return feat[(b_opts >> 3) & 3];
+  if (!strcmp(key, "gpsp_sound_rate"))
+    return ((b_opts >> 5) & 31) == 15 ? "32768" : "65536";
+  return NULL;
+}
+
 static bool b_environ(unsigned cmd, void *data) {
   switch (cmd) {
+  case RETRO_ENVIRONMENT_GET_VARIABLE: {
+    struct retro_variable *var = (struct retro_variable*)data;
+    const char *v = var && var->key ? b_option(var->key) : NULL;
+    if (v) {
+      var->value = v;
+      return true;
+    }
+    return ds.environ_cb(cmd, data);
+  }
   case RETRO_ENVIRONMENT_GET_SYSTEM_DIRECTORY:
   case RETRO_ENVIRONMENT_GET_SAVE_DIRECTORY:
   case RETRO_ENVIRONMENT_GET_VFS_INTERFACE:
-  case RETRO_ENVIRONMENT_GET_VARIABLE:
-    // Same settings and files as the GBA the player sees.
+    // Same files as the GBA the player sees.
     return ds.environ_cb(cmd, data);
   case RETRO_ENVIRONMENT_GET_VARIABLE_UPDATE:
     *(bool*)data = false;
@@ -569,17 +713,32 @@ static void *b_thread_main(void *arg) {
     sem_wait(&ds.hid[k].start);
     if (ds.hid[k].quit)
       break;
+#ifdef DUAL_DEBUG
+    // Test of the stuck bus: a hidden GBA does not show up for a while.
+    if (getenv("DUAL_STUCK") && ds.frame == 300)
+      sleep(8);
+#endif
     hid_if[k].run();
     sem_post(&ds.hid[k].done);
   }
   return NULL;
 }
 
-static bool b_load(unsigned k) {
+static void b_unload(unsigned k);
+
+// Hidden GBA k with this game (sharing the ROM with ours if it is the same)
+// and these options. Loaded again only if it has another of them.
+static bool b_load_as(unsigned k, const char *path, bool share, u32 opts) {
   const gba_iface *g = &hid_if[k];
   struct retro_game_info info;
-  if (ds.hid[k].loaded)
-    return true;
+  if (ds.hid[k].loaded) {
+    if (ds.hid[k].shared == share && ds.hid[k].opts == opts &&
+        !strcmp(ds.hid[k].path, path))
+      return true;
+    b_unload(k);
+  }
+  b_opts = opts;
+  b_share = share;
 
   g->set_environment(b_environ);
   g->set_video_refresh(b_video);
@@ -590,7 +749,7 @@ static bool b_load(unsigned k) {
   g->init();
 
   memset(&info, 0, sizeof(info));
-  info.path = ds.rom_path;
+  info.path = path;
   if (!g->load_game(&info)) {
     g->deinit();
     return false;
@@ -599,7 +758,7 @@ static bool b_load(unsigned k) {
   // Without its JIT cache (see memmap.c) a hidden GBA would run on the
   // interpreter, whose timing is not that of its copy on the other console:
   // the real time cable is better than GBAs that drift apart.
-  if (dynarec_enable && !*hid_dynarec[k]) {
+  if ((opts & 1) && !*hid_dynarec[k]) {
     g->unload_game();
     g->deinit();
     return false;
@@ -619,14 +778,24 @@ static bool b_load(unsigned k) {
     }
   }
   ds.hid[k].loaded = true;
+  ds.hid[k].shared = share;
+  ds.hid[k].opts = opts;
+  strncpy(ds.hid[k].path, path, sizeof(ds.hid[k].path) - 1);
+  ds.hid[k].path[sizeof(ds.hid[k].path) - 1] = 0;
   return true;
 }
 
-// The hidden GBAs for `players` (only as many as the option asks for).
+// Copies of our GBA: our game and options.
+static bool b_load(unsigned k) {
+  return b_load_as(k, ds.rom_path, true, dual_machine_opts());
+}
+
+// The hidden GBAs for `players` (only as many as the option asks for), as
+// copies of ours until the session says otherwise (dual_prepare_hidden).
 static bool b_load_for(unsigned players) {
   unsigned k;
   for (k = 0; k + 1 < players; k++)
-    if (!b_load(k))
+    if (!ds.hid[k].loaded && !b_load(k))
       return false;
   return true;
 }
@@ -648,11 +817,11 @@ static void b_unload(unsigned k) {
 }
 
 // The hidden GBAs read the ROM from ours (gba_memory.c), when we have it all
-// in memory: blocks of 1 MB.
+// in memory and it is their game too: blocks of 1 MB.
 const u8 *dual_rom_block(u32 idx) {
   extern u8 *gamepak_buffers[32];
   extern u32 gamepak_file_blocks;
-  if (gamepak_must_swap() || gamepak_mini_materialized ||
+  if (!b_share || gamepak_must_swap() || gamepak_mini_materialized ||
       idx >= gamepak_buffer_count || idx >= (gamepak_file_blocks + 31) / 32)
     return NULL;
   return gamepak_buffers[idx];
@@ -660,8 +829,15 @@ const u8 *dual_rom_block(u32 idx) {
 
 /* ---- agreement checks -------------------------------------------------- */
 
+// (A word at a time: this is some 400 KB per GBA, on the frame that checks.)
 static u32 fnv(u32 h, const void *data, size_t len) {
   const u8 *p = (const u8*)data;
+  for (; len >= 4; len -= 4, p += 4) {
+    u32 w;
+    memcpy(&w, p, 4);
+    h = (h ^ w) * 16777619u;
+    h = (h << 5) | (h >> 27);
+  }
   while (len--)
     h = (h ^ *p++) * 16777619u;
   return h;
@@ -780,12 +956,21 @@ static void dual_stop(const char *why) {
     serialcable_session_reset();
     ds.loaded = false;
   }
+  // A game of another console takes as much memory as its ROM: it goes now
+  // (the copies of ours share our ROM and stay, ready for the next session).
+  for (k = 0; k < DUAL_HIDDEN; k++)
+    if (ds.hid[k].loaded && !ds.hid[k].shared)
+      b_unload(k);
 }
 
 // The real time cable for the rest of this session (for everybody).
 static void dual_give_up(const char *why) {
   if (ds.is_host) {
-    u32 w[1] = { why && !strcmp(why, DUAL_MSG_PLAYERS) };
+    u32 w[1] = { DUAL_WHY_DIFFER };
+    if (why && !strcmp(why, DUAL_MSG_PLAYERS)) w[0] = DUAL_WHY_PLAYERS;
+    if (why && !strcmp(why, DUAL_MSG_NOROM))   w[0] = DUAL_WHY_NOROM;
+    if (why && !strcmp(why, DUAL_MSG_MEMORY))  w[0] = DUAL_WHY_MEMORY;
+    if (why && !strcmp(why, DUAL_MSG_OTHER))   w[0] = DUAL_WHY_OTHER;
     dual_send_all(DPK_GIVEUP, w, 1, NULL, 0);
   }
   else if (ds.state == DS_HELLO || ds.state == DS_WAIT)
@@ -816,26 +1001,34 @@ static void dual_count_stall(unsigned s, u32 f) {
 
 static u32 dual_rom_crc(void) ;
 
+// HELLO: the version, our game and settings (each console runs a copy of
+// ours with them), the players we want and whether we are the host.
+#define DUAL_HELLO_WORDS   (6 + 5)
 static void dual_send_hello(unsigned to) {
-  u32 w[6];
+  u32 w[DUAL_HELLO_WORDS];
   w[0] = DUAL_VERSION;
-  w[1] = dual_rom_crc();
-  w[2] = dual_crc32(0, bios_rom, 0x4000);
-  w[3] = ds.cfg;
+  w[1] = ds.own.hash;
+  w[2] = ds.own.bios;
+  w[3] = ds.own.cfg;
   w[4] = ds.players;
   w[5] = ds.is_host ? 1 : 0;
-  dual_send(to, DPK_HELLO, w, 6, NULL, 0);
+  w[6] = ds.own.opts;
+  w[7] = ds.own.size;
+  w[8] = ds.own.code;
+  w[9] = ds.own.key;
+  w[10] = ds.own.quick;
+  dual_send(to, DPK_HELLO, w, DUAL_HELLO_WORDS, ds.own.name,
+            (u32)strlen(ds.own.name) + 1);
   ds.hello_sent = true;
   ds.t_hello = netpacket_time_usec();
 }
 
+// Another game, other settings or another number of players do not stop
+// the dual cable any more (each console loads the others' games, copies run
+// with their owner's settings, clients take the host's number of players):
+// only another version of the link does.
 static bool dual_hello_matches(const u32 *w) {
-  return w[0] == DUAL_VERSION &&
-         w[1] == dual_rom_crc() &&
-         w[2] == dual_crc32(0, bios_rom, 0x4000) &&
-         w[3] == ds.cfg &&
-         w[4] == ds.players &&
-         w[5] == (ds.is_host ? 0 : 1);
+  return w[0] == DUAL_VERSION && w[5] == (ds.is_host ? 0 : 1);
 }
 
 // One 32 KB block of the ROM. The RTC/rumble registers (C4-C9) are written
@@ -843,12 +1036,40 @@ static bool dual_hello_matches(const u32 *w) {
 static u32 rom_hash_block(u32 h, const u8 *data, u32 idx) {
   static u32 blk[32 * 1024 / 4];
   u32 i;
-  memcpy(blk, data, sizeof(blk));
-  if (!idx)
+  if (!idx) {
+    // (Only this block needs a copy to be changed.)
+    memcpy(blk, data, sizeof(blk));
     memset((u8*)blk + 0xC4, 0, 6);
-  for (i = 0; i < 32 * 1024 / 4; i++) {
-    h = (h ^ blk[i]) * 0x01000193u;
+    data = (const u8*)blk;
+  }
+  for (i = 0; i < 32 * 1024; i += 4) {
+    u32 w;
+    memcpy(&w, &data[i], 4);
+    h = (h ^ w) * 0x01000193u;
     h = (h << 5) | (h >> 27);
+  }
+  return h;
+}
+
+// Which game a GBA runs: all its ROM, hashed. From memory if it has it all
+// there, from the file otherwise (same result).
+static u32 rom_hash_gba(u8 **buffers, u32 file_blocks, bool in_memory,
+                        const char *path) {
+  u32 h = 0x811C9DC5u ^ file_blocks, b;
+  if (in_memory) {
+    for (b = 0; b < file_blocks; b++)
+      h = rom_hash_block(h, &buffers[b >> 5][(b & 31) << 15], b);
+  }
+  else {
+    RFILE *f = filestream_open(path, RETRO_VFS_FILE_ACCESS_READ,
+                               RETRO_VFS_FILE_ACCESS_HINT_NONE);
+    static u8 buf[32 * 1024];
+    if (f) {
+      for (b = 0; b < file_blocks &&
+                  filestream_read(f, buf, sizeof(buf)) == sizeof(buf); b++)
+        h = rom_hash_block(h, buf, b);
+      filestream_close(f);
+    }
   }
   return h;
 }
@@ -860,27 +1081,381 @@ static u32 dual_rom_crc(void) {
   extern u8 *gamepak_buffers[32];
   extern u32 gamepak_file_blocks;
   if (!ds.rom_crc_valid) {
-    u32 h = 0x811C9DC5u ^ gamepak_file_blocks, b;
-    if (!gamepak_must_swap() && !gamepak_mini_materialized &&
-        gamepak_file_blocks <= gamepak_buffer_count * 32) {
-      for (b = 0; b < gamepak_file_blocks; b++)
-        h = rom_hash_block(h, &gamepak_buffers[b >> 5][(b & 31) << 15], b);
-    }
-    else {
-      RFILE *f = filestream_open(ds.rom_path, RETRO_VFS_FILE_ACCESS_READ,
-                                 RETRO_VFS_FILE_ACCESS_HINT_NONE);
-      static u8 buf[32 * 1024];
-      if (f) {
-        for (b = 0; b < gamepak_file_blocks &&
-                    filestream_read(f, buf, sizeof(buf)) == sizeof(buf); b++)
-          h = rom_hash_block(h, buf, b);
-        filestream_close(f);
-      }
-    }
-    ds.rom_crc = h;
+    ds.rom_crc = rom_hash_gba(gamepak_buffers, gamepak_file_blocks,
+                              !gamepak_must_swap() && !gamepak_mini_materialized &&
+                              gamepak_file_blocks <= gamepak_buffer_count * 32,
+                              ds.rom_path);
     ds.rom_crc_valid = true;
   }
   return ds.rom_crc;
+}
+
+/* ---- finding the other consoles' games ------------------------------------ */
+
+// A ROM file, quickly: its size, the header fields that tell games apart
+// (code, maker, version, checksum), and a hash of its first and last 32 KB
+// (two reads). Dumps of one game for other regions or Virtual Console share
+// size and often header, the quick hash tells most of them apart; the hash
+// of the whole ROM, once loaded, has the last word.
+// With `want`, it stops as soon as the file is not that game: size (no
+// read), then the header (one sector), and only then the 64 KB of the quick
+// hash. A folder has many files of the same size (on a FAT32 SD card every
+// read is a seek): most of them cost one small read.
+static bool rom_file_check(const char *path, dual_rom *id, const dual_rom *want) {
+  static u8 blk[32 * 1024];
+  RFILE *f = filestream_open(path, RETRO_VFS_FILE_ACCESS_READ,
+                             RETRO_VFS_FILE_ACCESS_HINT_NONE);
+  s64 size;
+  u32 blocks;
+  bool ok = false;
+  if (!f)
+    return false;
+  size = filestream_get_size(f);
+  if (size < 0xC0 || size > 64 * 1024 * 1024 || (want && size != want->size))
+    goto done;
+  id->size = (u32)size;
+  blocks = (id->size + 32767) >> 15;
+
+  if (filestream_read(f, blk, 0xC0) != 0xC0)
+    goto done;
+  id->code = blk[0xAC] | blk[0xAD] << 8 | blk[0xAE] << 16 | (u32)blk[0xAF] << 24;
+  id->key = blk[0xB0] | blk[0xB1] << 8 | blk[0xBC] << 16 | (u32)blk[0xBD] << 24;
+  if (want && (id->code != want->code || id->key != want->key))
+    goto done;
+
+  memset(&blk[0xC0], 0xFF, sizeof(blk) - 0xC0);
+  filestream_read(f, &blk[0xC0], sizeof(blk) - 0xC0);
+  id->quick = rom_hash_block(0x9E3779B9u, blk, 0);
+  if (blocks > 1) {
+    memset(blk, 0xFF, sizeof(blk));
+    filestream_seek(f, (s64)(blocks - 1) << 15, RETRO_VFS_SEEK_POSITION_START);
+    filestream_read(f, blk, sizeof(blk));
+    id->quick = rom_hash_block(id->quick, blk, blocks - 1);
+  }
+  ok = !want || id->quick == want->quick;
+done:
+  filestream_close(f);
+  return ok;
+}
+
+static bool rom_file_id(const char *path, dual_rom *id) {
+  return rom_file_check(path, id, NULL);
+}
+
+// Whether the file is (likely) that game: same size, header and quick hash.
+static bool rom_file_is(const char *path, const dual_rom *want) {
+  dual_rom id;
+  return rom_file_check(path, &id, want);
+}
+
+static const char *base_name(const char *path) {
+  const char *a = strrchr(path, '/'), *b = strrchr(path, '\\');
+  if (b > a)
+    a = b;
+  return a ? a + 1 : path;
+}
+
+// The folder of our game, with a separator at the end ("" if none).
+static void rom_folder(char *out, size_t size) {
+  const char *name = base_name(ds.rom_path);
+  size_t n = (size_t)(name - ds.rom_path);
+  if (n >= size)
+    n = 0;
+  memcpy(out, ds.rom_path, n);
+  out[n] = 0;
+}
+
+static bool index_path(char *out, size_t size) {
+  const char *dir = NULL;
+  if (!ds.environ_cb(RETRO_ENVIRONMENT_GET_SYSTEM_DIRECTORY, &dir) || !dir || !*dir)
+    return false;
+  snprintf(out, size, "%s/%s", dir, DUAL_ROM_INDEX);
+  return true;
+}
+
+// The index of the games found before (system folder): a line per game,
+// "hash size quick path". Looking for a game in a folder means opening the
+// files with the right size one by one, slow on a FAT32 SD card with many
+// of them; with the index the next session goes straight to it.
+static bool index_lookup(const dual_rom *want, char *out, size_t size) {
+  char ipath[1024], line[1200];
+  bool found = false;
+  RFILE *f;
+  if (!index_path(ipath, sizeof(ipath)))
+    return false;
+  f = filestream_open(ipath, RETRO_VFS_FILE_ACCESS_READ,
+                      RETRO_VFS_FILE_ACCESS_HINT_NONE);
+  if (!f)
+    return false;
+  while (filestream_gets(f, line, sizeof(line))) {
+    unsigned h, sz, q;
+    int at = 0;
+    char *nl = strpbrk(line, "\r\n");
+    if (nl)
+      *nl = 0;
+    if (sscanf(line, "%x %x %x %n", &h, &sz, &q, &at) == 3 && at > 0 &&
+        h == want->hash && sz == want->size && q == want->quick) {
+      strncpy(out, &line[at], size - 1);
+      out[size - 1] = 0;
+      found = true;     // (the last one wins: newer)
+    }
+  }
+  filestream_close(f);
+  return found;
+}
+
+static void index_add(const dual_rom *id, const char *path) {
+  char ipath[1024], line[1200];
+  RFILE *f;
+  int n;
+  if (!index_path(ipath, sizeof(ipath)))
+    return;
+  // (Opened to write without UPDATE_EXISTING it would be emptied.)
+  f = filestream_open(ipath, RETRO_VFS_FILE_ACCESS_WRITE |
+                      RETRO_VFS_FILE_ACCESS_UPDATE_EXISTING,
+                      RETRO_VFS_FILE_ACCESS_HINT_NONE);
+  if (!f)
+    f = filestream_open(ipath, RETRO_VFS_FILE_ACCESS_WRITE,
+                        RETRO_VFS_FILE_ACCESS_HINT_NONE);
+  if (!f)
+    return;
+  filestream_seek(f, 0, RETRO_VFS_SEEK_POSITION_END);
+  n = snprintf(line, sizeof(line), "%08x %08x %08x %s\n",
+               (unsigned)id->hash, (unsigned)id->size, (unsigned)id->quick, path);
+  if (n > 0 && (size_t)n < sizeof(line))
+    filestream_write(f, line, n);
+  filestream_close(f);
+}
+
+// How many characters two file names start alike with (case apart).
+#define DUAL_SCAN_BEST  16        // Files looked at for their name
+#define DUAL_SCAN_US    500000    // ...and the time for the others
+static unsigned name_alike(const char *a, const char *b) {
+  unsigned n = 0;
+  while (a[n] && b[n] && tolower((unsigned char)a[n]) == tolower((unsigned char)b[n]))
+    n++;
+  return n;
+}
+
+// Files that may be that game, best first: the one the index says, the one
+// with its name in our folder, then the others in our folder with its size
+// and header (see below for the order). Only the files of the right size are
+// opened; a file that is not .gba/.bin is not even looked at.
+static unsigned rom_candidates(const dual_rom *want, char (*out)[1024],
+                               unsigned max) {
+  char folder[1024], path[1024];
+  unsigned n = 0, i;
+
+  if (index_lookup(want, path, sizeof(path)) && rom_file_is(path, want))
+    strcpy(out[n++], path);
+
+  rom_folder(folder, sizeof(folder));
+  if (want->name[0] && !strchr(want->name, '/') && !strchr(want->name, '\\') &&
+      strcmp(want->name, "..") && n < max) {
+    snprintf(path, sizeof(path), "%s%s", folder, want->name);
+    for (i = 0; i < n && strcmp(out[i], path); i++);
+    if (i == n && rom_file_is(path, want))
+      strcpy(out[n++], path);
+  }
+
+#ifdef DUAL_HAVE_DIRS
+  if (n < max) {
+    // Looking a file up by name (stat) reads the folder from its start on
+    // FAT32: with a whole collection in it (thousands of games) a stat of
+    // each one took half a minute on a Miyoo Mini, the game frozen. So the
+    // names come first, which cost nothing more than reading the folder:
+    // the files named most like the other game (or like ours: another
+    // region or edition) are looked at first, and the rest only for as long
+    // as DUAL_SCAN_US allows (a small folder is done well within it).
+    static char best[DUAL_SCAN_BEST][256];
+    unsigned score[DUAL_SCAN_BEST], nbest = 0, pass, b;
+    const char *own = strrchr(ds.rom_path, '/');
+    const u64 t0 = netpacket_time_usec();
+    DIR *d = opendir(folder[0] ? folder : ".");
+    struct dirent *e;
+    own = own ? own + 1 : ds.rom_path;
+    for (pass = 0; d && pass < 2 && n < max; pass++) {
+      if (pass) {
+        rewinddir(d);
+        // The likely ones, best first.
+        for (b = 0; b < nbest && n < max; b++) {
+          struct stat st;
+          snprintf(path, sizeof(path), "%s%s", folder, best[b]);
+          if (stat(path, &st) || (u64)st.st_size != want->size ||
+              !strcmp(path, ds.rom_path))
+            continue;
+          for (i = 0; i < n && strcmp(out[i], path); i++);
+          if (i == n && rom_file_is(path, want))
+            strcpy(out[n++], path);
+        }
+      }
+      while (n < max && (e = readdir(d))) {
+        const char *ext = strrchr(e->d_name, '.');
+        struct stat st;
+        if (!ext || (strcasecmp(ext, ".gba") && strcasecmp(ext, ".bin")) ||
+            strlen(e->d_name) >= sizeof(best[0]))
+          continue;
+        if (!pass) {
+          const unsigned sc = name_alike(e->d_name, want->name) >
+                              name_alike(e->d_name, own) ?
+                              name_alike(e->d_name, want->name) :
+                              name_alike(e->d_name, own);
+          for (b = nbest; b && score[b - 1] < sc; b--);
+          if (b >= DUAL_SCAN_BEST)
+            continue;
+          if (nbest < DUAL_SCAN_BEST)
+            nbest++;
+          for (i = nbest - 1; i > b; i--) {
+            strcpy(best[i], best[i - 1]);
+            score[i] = score[i - 1];
+          }
+          strcpy(best[b], e->d_name);
+          score[b] = sc;
+          continue;
+        }
+        if (netpacket_time_usec() - t0 > DUAL_SCAN_US)
+          break;
+        for (b = 0; b < nbest && strcmp(best[b], e->d_name); b++);
+        if (b < nbest)
+          continue;
+        snprintf(path, sizeof(path), "%s%s", folder, e->d_name);
+        if (stat(path, &st) || (u64)st.st_size != want->size ||
+            !strcmp(path, ds.rom_path))
+          continue;
+        for (i = 0; i < n && strcmp(out[i], path); i++);
+        if (i == n && rom_file_is(path, want))
+          strcpy(out[n++], path);
+      }
+    }
+    if (d)
+      closedir(d);
+  }
+#endif
+  return n;
+}
+
+// Memory the system can still give (bytes), or ~0 if it does not say.
+static u64 mem_available(void) {
+#ifdef __linux__
+  char line[128];
+  u64 kb = ~0ULL;
+  FILE *f = fopen("/proc/meminfo", "r");
+  if (!f)
+    return ~0ULL;
+  while (fgets(line, sizeof(line), f))
+    if (sscanf(line, "MemAvailable: %llu kB", (unsigned long long*)&kb) == 1)
+      break;
+  fclose(f);
+  return kb == ~0ULL ? kb : kb * 1024;
+#else
+  return ~0ULL;
+#endif
+}
+
+// Our game, as the others need to know it.
+static void dual_own_rom(void) {
+  dual_rom *o = &ds.own;
+  memset(o, 0, sizeof(*o));
+  if (!rom_file_id(ds.rom_path, o))
+    o->size = o->code = o->key = o->quick = 0;
+  o->hash = dual_rom_crc();
+  o->opts = dual_machine_opts();
+  o->cfg = ds.cfg;
+  o->bios = dual_crc32(0, bios_rom, 0x4000);
+  strncpy(o->name, base_name(ds.rom_path), DUAL_NAME_MAX - 1);
+}
+
+static void rom_to_words(const dual_rom *r, u32 *w) {
+  w[0] = r->hash; w[1] = r->size; w[2] = r->code; w[3] = r->key;
+  w[4] = r->quick; w[5] = r->opts; w[6] = r->cfg; w[7] = r->bios;
+}
+
+static void rom_from_words(dual_rom *r, const u32 *pkt, const u8 *name,
+                           u32 name_len) {
+  r->hash = netorder32(pkt[0]); r->size = netorder32(pkt[1]);
+  r->code = netorder32(pkt[2]); r->key = netorder32(pkt[3]);
+  r->quick = netorder32(pkt[4]); r->opts = netorder32(pkt[5]);
+  r->cfg = netorder32(pkt[6]); r->bios = netorder32(pkt[7]);
+  memset(r->name, 0, sizeof(r->name));
+  if (name)
+    memcpy(r->name, name, MIN(name_len, DUAL_NAME_MAX - 1));
+}
+
+// Whether hidden GBA k came out as the copy slot s needs: the same game
+// (all of it) and the same machine.
+static bool b_matches(unsigned k, const dual_rom *want) {
+  const gba_iface *g = &hid_if[k];
+  const u32 blocks = *g->rom_blocks;
+  // A copy of our GBA runs our game, from our file (and most often from our
+  // memory, dual_rom_block): no need to hash all of it again, megabytes at
+  // each session start for each GBA, while the players wait.
+  const u32 hash = ds.hid[k].shared ? dual_rom_crc() :
+                   rom_hash_gba(g->rom_buffers, blocks,
+                                !g->must_swap() && !*g->rom_mini &&
+                                blocks <= 32 * 32, ds.hid[k].path);
+  return hash == want->hash && g->machine_cfg() == want->cfg;
+}
+
+// Every hidden GBA ready for its slot, with its owner's game and options,
+// and the BIOS its owner has (or the built-in one, everywhere, when they
+// differ). Returns 0 or the DUAL_WHY_* that stops it.
+static u32 dual_prepare_hidden(void) {
+  const bool builtin = (ds.start_flags & DUAL_START_BUILTIN) != 0;
+  unsigned k;
+
+  // Our own GBA first. (It restarts through the BIOS when the session
+  // starts, so it can change now; it keeps the built-in one afterwards, as
+  // a game running on it cannot have its BIOS changed under it.)
+  if (builtin) {
+    dual_set_bios(NULL);
+    ds.bios_swapped = true;
+    dual_msg("Cable Link: the consoles have different BIOS, every GBA uses the built-in one");
+  }
+
+  for (k = 0; k + 1 < ds.n; k++) {
+    const unsigned s = hidden_slot(k);
+    const dual_rom *want = &ds.slot_rom[s];
+    bool ok = false;
+
+    if (want->hash == ds.own.hash && want->size == ds.own.size) {
+      // Our game: the ROM is shared, only the options can differ.
+      ok = b_load_as(k, ds.rom_path, true, want->opts) && b_matches(k, want);
+      if (!ok)
+        return DUAL_WHY_DIFFER;
+    }
+    else if (!(ds.start_flags & DUAL_START_OTHER))
+      return DUAL_WHY_OTHER;
+    else {
+      static char cand[DUAL_FIND_MAX][1024];
+      const unsigned n = rom_candidates(want, cand, DUAL_FIND_MAX);
+      unsigned c;
+      if (!n)
+        return DUAL_WHY_NOROM;
+      // Room for it? (Ours does not count: it is not loaded twice.)
+      b_unload(k);
+      if (mem_available() < (u64)want->size + DUAL_MEM_MARGIN)
+        return DUAL_WHY_MEMORY;
+      for (c = 0; c < n && !ok; c++) {
+        ok = b_load_as(k, cand[c], false, want->opts) && b_matches(k, want);
+        if (ok) {
+          // Next time straight to it (unless the index says so already).
+          char known[1024];
+          if (!index_lookup(want, known, sizeof(known)) || strcmp(known, cand[c]))
+            index_add(want, cand[c]);
+        }
+      }
+      if (!ok) {
+        b_unload(k);
+        return DUAL_WHY_NOROM;
+      }
+    }
+
+    // Its owner's BIOS: ours, as they are all the same (or the built-in).
+    hid_if[k].set_bios(builtin ? NULL : bios_rom);
+    if (!builtin && dual_crc32(0, hid_if[k].bios, 0x4000) != want->bios)
+      return DUAL_WHY_DIFFER;
+  }
+  return 0;
 }
 
 static void dual_send_ping(unsigned s) {
@@ -989,6 +1564,10 @@ static void dual_session_reset(void) {
   ds.early_hello = 0;
   ds.gave_up = false;
   ds.hello_sent = ds.hello_rcvd = ds.go = ds.peer_ready = false;
+  ds.roms_done = false;
+  ds.roms_ok = 0;
+  ds.start_flags = 0;
+  memset(ds.id_rom, 0, sizeof(ds.id_rom));
   memset(ds.peer_pack_len, 0, sizeof(ds.peer_pack_len));
   memset(ds.peer_rcvd, 0, sizeof(ds.peer_rcvd));
   memset(ds.rtt_n, 0, sizeof(ds.rtt_n));
@@ -1086,23 +1665,69 @@ static void dual_cand_ready(void) {
   }
 }
 
-// Host: everybody is here. Each client gets its slot, in the order they came.
+// START: players, client id of each slot, flags, then each slot's game
+// (DUAL_ROM_WORDS each); the names follow, DUAL_NAME_MAX bytes each.
+#define DUAL_START_WORDS   (2 + NP + NP * DUAL_ROM_WORDS)
+
+// Host: everybody is here. Each client gets its slot, in the order they came,
+// and everybody hears which game and settings each slot has. If the BIOS are
+// not all the same, every GBA uses the built-in one.
 static void dual_host_start(void) {
-  u32 w[1 + NP];
+  u32 w[DUAL_START_WORDS];
+  static char names[NP][DUAL_NAME_MAX];
   unsigned s;
+  u32 flags = 0;
+  // What START will say, before anything else: a give up now goes out
+  // with no slot (the clients do not have theirs yet, they would drop it).
+  for (s = 0; s < ds.ncand; s++) {
+    const dual_rom *r = &ds.id_rom[ds.cand[s].id % DUAL_IDS];
+    if (r->bios != ds.own.bios)
+      flags |= DUAL_START_BUILTIN;
+    if (r->hash != ds.own.hash || r->size != ds.own.size)
+      flags |= DUAL_START_OTHER;
+  }
+  // Other games: each console would look for them on its card and load
+  // them, which takes a while (core option). Otherwise the real time cable
+  // takes them, right away.
+  if ((flags & DUAL_START_OTHER) && !ds.other_games) {
+    dual_give_up(DUAL_MSG_OTHER);
+    return;
+  }
   ds.n = ds.ncand + 1;
   ds.my_slot = 0;
   ds.slot_id[0] = 0;
-  for (s = 1; s < ds.n; s++)
+  ds.slot_rom[0] = ds.own;
+  ds.start_flags = flags;
+  for (s = 1; s < ds.n; s++) {
     ds.slot_id[s] = ds.cand[s - 1].id;
+    ds.slot_rom[s] = ds.id_rom[ds.slot_id[s] % DUAL_IDS];
+  }
+  memset(w, 0, sizeof(w));
+  memset(names, 0, sizeof(names));
   w[0] = ds.n;
   for (s = 0; s < NP; s++)
     w[1 + s] = (u32)ds.slot_id[s];
-  dual_send_all(DPK_START, w, 1 + NP, NULL, 0);
-  ds.state = DS_PING;
+  w[1 + NP] = ds.start_flags;
+  for (s = 0; s < ds.n; s++) {
+    rom_to_words(&ds.slot_rom[s], &w[2 + NP + s * DUAL_ROM_WORDS]);
+    memcpy(names[s], ds.slot_rom[s].name, DUAL_NAME_MAX);
+    names[s][DUAL_NAME_MAX - 1] = 0;
+  }
+  dual_send_all(DPK_START, w, DUAL_START_WORDS, names, sizeof(names));
+  ds.state = DS_ROMS;
+  ds.roms_done = false;
+  ds.roms_ok = 1;
   ds.t_state = netpacket_time_usec();
-  for (s = 1; s < ds.n; s++)
-    dual_send_ping(s);
+}
+
+static const char *dual_why_msg(u32 why) {
+  switch (why) {
+  case DUAL_WHY_PLAYERS: return DUAL_MSG_PLAYERS;
+  case DUAL_WHY_NOROM:   return DUAL_MSG_NOROM;
+  case DUAL_WHY_MEMORY:  return DUAL_MSG_MEMORY;
+  case DUAL_WHY_OTHER:   return DUAL_MSG_OTHER;
+  default:               return DUAL_MSG_DIFFER;
+  }
 }
 
 static void dual_begin_transfer(void) {
@@ -1144,6 +1769,37 @@ static void dual_setup_step(void) {
       if (s == ds.ncand)
         dual_host_start();
     }
+    return;
+  }
+
+  if (ds.state == DS_ROMS) {
+    // Our hidden GBAs, for the games and settings START gave (this can take
+    // a second or two: a game of another console is read from the card).
+    if (!ds.roms_done) {
+      const u32 why = dual_prepare_hidden();
+      ds.roms_done = true;
+      if (!ds.is_host) {
+        u32 w[1] = { why };
+        dual_send(0, DPK_ROMOK, w, 1, NULL, 0);
+      }
+      if (why) {
+        dual_give_up(dual_why_msg(why));
+        return;
+      }
+      if (!ds.is_host) {
+        ds.state = DS_PING;     // (Waits for GO, the host measures)
+        ds.t_state = netpacket_time_usec();
+        return;
+      }
+    }
+    // Host: once every console is ready, the round trips.
+    for (s = 0; s < ds.n && (ds.roms_ok & (1u << s)); s++);
+    if (s < ds.n)
+      return;
+    ds.state = DS_PING;
+    ds.t_state = now;
+    for (s = 1; s < ds.n; s++)
+      dual_send_ping(s);
     return;
   }
 
@@ -1189,7 +1845,7 @@ static void dual_setup_step(void) {
   if (ds.state == DS_READY && (ds.is_host || ds.peer_ready))
     dual_start_running();
 
-  if (ds.state >= DS_PING && ds.state < DS_RUN &&
+  if (ds.state >= DS_ROMS && ds.state < DS_RUN &&
       now - ds.t_state > DUAL_SETUP_US) {
     dual_send_all(DPK_BYE, NULL, 0, NULL, 0);
     dual_stop("Cable Link: another console did not answer");
@@ -1224,6 +1880,10 @@ void dual_set_cfg(u32 cfg) {
     b_unload(k);
 }
 
+void dual_set_other_games(bool on) {
+  ds.other_games = on;
+}
+
 // The core option. (A session that is on keeps its own number.)
 void dual_set_players(unsigned players) {
   ds.cfg_players = MAX(2, MIN(players, DUAL_MAX_PLAYERS));
@@ -1242,13 +1902,15 @@ void dual_session_start(unsigned client_id) {
   ds.boot_reset = false;
   ds.is_host = (client_id == 0);
   ds.my_id = client_id;
+  // (Our game goes in the HELLO.)
+  dual_rom_crc();
+  dual_own_rom();
   if (ds.is_host)
     ds.state = DS_WAIT;
   else {
     ds.state = DS_HELLO;
     dual_send_hello(0);
   }
-  dual_rom_crc();
   // Only the GBAs the option asks for: free the others (left from a session
   // with more players), the memory of the console is small.
   {
@@ -1539,6 +2201,13 @@ static void dual_check_hash(u32 f) {
 
 void dual_frame_end(void) {
   const u32 f = ds.frame++;
+  if (bus.abort) {
+    // A GBA waited for another one that never came (see BUS_WAIT): they
+    // are not the same machines as on the other consoles any more.
+    dual_send_all(DPK_BYE, NULL, 0, NULL, 0);
+    dual_stop("Cable Link: the GBAs of this console lost each other");
+    return;
+  }
   if (f % DUAL_HASH_EVERY == 0) {
     u32 w[1 + NP], *mine = ds.my_hash[(f / DUAL_HASH_EVERY) % DUAL_HASH_SLOTS];
     unsigned s;
@@ -1555,11 +2224,17 @@ void dual_frame_end(void) {
 
 // Returns true if the packet was ours.
 bool dual_net_receive(const void *buf, size_t len, uint16_t client_id) {
-  const u32 *pkt = (const u32*)buf;
+  // The words of the packet (the frontend's buffer is not ours to assume
+  // aligned); what follows them (names, state) is read from `buf`.
+  u32 pkt[2 + DUAL_START_WORDS];
   const u64 now = netpacket_time_usec();
   u32 type, from;
   unsigned s;
-  if (len < 8 || netorder32(pkt[0]) != DUAL_HEADER)
+  if (len < 8)
+    return false;
+  memset(pkt, 0, sizeof(pkt));
+  memcpy(pkt, buf, MIN(len, sizeof(pkt)));
+  if (netorder32(pkt[0]) != DUAL_HEADER)
     return false;
   if (ds.state == DS_OFF)
     return true;
@@ -1582,14 +2257,33 @@ bool dual_net_receive(const void *buf, size_t len, uint16_t client_id) {
     if (len < 8 + 6 * 4)
       break;
     {
-      u32 w[6];
-      for (s = 0; s < 6; s++)
+      u32 w[DUAL_HELLO_WORDS];
+      dual_rom r;
+      memset(w, 0, sizeof(w));
+      for (s = 0; s < DUAL_HELLO_WORDS && 8 + s * 4 + 4 <= len; s++)
         w[s] = netorder32(pkt[2 + s]);
+      // (An older version sends 6 words: it does not match anyway.)
+      if (len < 8 + DUAL_HELLO_WORDS * 4)
+        w[0] = 0;
+      memset(&r, 0, sizeof(r));
+      r.hash = w[1]; r.bios = w[2]; r.cfg = w[3]; r.opts = w[6];
+      r.size = w[7]; r.code = w[8]; r.key = w[9]; r.quick = w[10];
+      if (len > 8 + DUAL_HELLO_WORDS * 4)
+        memcpy(r.name, (const u8*)buf + 8 + DUAL_HELLO_WORDS * 4,
+               MIN(len - (8 + DUAL_HELLO_WORDS * 4), DUAL_NAME_MAX - 1));
       if (ds.is_host && ds.state == DS_WAIT) {
         for (s = 0; s < ds.ncand && ds.cand[s].id != (int)client_id; s++);
         if (!dual_hello_matches(w)) {
           // Same answer for everybody: the real time cable.
-          dual_give_up(w[4] != ds.players ? DUAL_MSG_PLAYERS : DUAL_MSG_DIFFER);
+          dual_give_up(w[0] != DUAL_VERSION ? DUAL_MSG_VERSION : DUAL_MSG_DIFFER);
+          break;
+        }
+        // Its game and settings, for START. (Its number of players does not
+        // matter: it takes ours, from our answer.)
+        if (client_id < DUAL_IDS)
+          ds.id_rom[client_id] = r;
+        else {
+          dual_give_up(DUAL_MSG_DIFFER);
           break;
         }
         // Answer right away, even if the frontend has not told us about it
@@ -1607,10 +2301,24 @@ bool dual_net_receive(const void *buf, size_t len, uint16_t client_id) {
       }
       else if (!ds.is_host && ds.state == DS_HELLO && client_id == 0) {
         ds.hello_rcvd = true;
-        if (!dual_hello_matches(w))
-          dual_give_up(w[4] != ds.players ? DUAL_MSG_PLAYERS : DUAL_MSG_DIFFER);
-        else
+        if (w[0] != DUAL_VERSION)
+          dual_give_up(DUAL_MSG_VERSION);
+        else if (!dual_hello_matches(w) || w[4] < 2 || w[4] > NP)
+          dual_give_up(DUAL_MSG_DIFFER);
+        else {
+          // The host says how many GBAs there are.
+          if (w[4] != ds.players) {
+            char msg[96];
+            unsigned k;
+            ds.players = w[4];
+            for (k = ds.players - 1; k < DUAL_HIDDEN; k++)
+              b_unload(k);
+            snprintf(msg, sizeof(msg), "Cable Link: %u players, as the host has it",
+                     ds.players);
+            dual_msg(msg);
+          }
           ds.state = DS_WAIT;
+        }
       }
     }
     break;
@@ -1625,9 +2333,11 @@ bool dual_net_receive(const void *buf, size_t len, uint16_t client_id) {
     break;
 
   case DPK_START:
-    if (len >= 8 + (1 + NP) * 4 && !ds.is_host && client_id == 0 &&
+    if (len >= 8 + DUAL_START_WORDS * 4 + NP * DUAL_NAME_MAX &&
+        !ds.is_host && client_id == 0 &&
         (ds.state == DS_WAIT || ds.state == DS_HELLO)) {
       const u32 n = netorder32(pkt[2]);
+      const u8 *names = (const u8*)buf + 8 + DUAL_START_WORDS * 4;
       if (n < 2 || n > NP || n != ds.players) {
         dual_give_up(DUAL_MSG_PLAYERS);
         break;
@@ -1644,10 +2354,25 @@ bool dual_net_receive(const void *buf, size_t len, uint16_t client_id) {
         dual_give_up(NULL);
         break;
       }
+      ds.start_flags = netorder32(pkt[2 + 1 + NP]);
+      for (s = 0; s < n; s++)
+        rom_from_words(&ds.slot_rom[s], &pkt[2 + 2 + NP + s * DUAL_ROM_WORDS],
+                       names + s * DUAL_NAME_MAX, DUAL_NAME_MAX);
       for (s = 0; s < NP; s++)
         ds.t_heard[s] = now;
-      ds.state = DS_PING;
+      ds.state = DS_ROMS;       // (dual_setup_step loads the other games)
+      ds.roms_done = false;
       ds.t_state = now;
+    }
+    break;
+
+  case DPK_ROMOK:
+    if (len >= 12 && ds.is_host && from != DUAL_NO_SLOT && ds.state == DS_ROMS) {
+      const u32 why = netorder32(pkt[2]);
+      if (why)
+        dual_give_up(dual_why_msg(why));
+      else
+        ds.roms_ok |= 1u << from;
     }
     break;
 
@@ -1683,7 +2408,7 @@ bool dual_net_receive(const void *buf, size_t len, uint16_t client_id) {
       // (Checked so that no sum can wrap around.)
       if (ds.peer_pack[from] && total <= DUAL_PACK_MAX && off <= total &&
           dlen <= total - off) {
-        memcpy(&ds.peer_pack[from][off], &pkt[4], dlen);
+        memcpy(&ds.peer_pack[from][off], (const u8*)buf + 16, dlen);
         ds.peer_pack_len[from] = total;
         ds.peer_rcvd[from] += dlen;
       }
@@ -1740,7 +2465,7 @@ bool dual_net_receive(const void *buf, size_t len, uint16_t client_id) {
       dual_stop(NULL);
       ds.gave_up = true;
       ds.boot_reset = true;
-      dual_msg(len >= 12 && netorder32(pkt[2]) ? DUAL_MSG_PLAYERS : DUAL_MSG_DIFFER);
+      dual_msg(dual_why_msg(len >= 12 ? netorder32(pkt[2]) : DUAL_WHY_DIFFER));
     }
     break;
 

@@ -558,6 +558,11 @@ void netpacket_send(uint16_t client_id, const void *buf, size_t len) {
     netpacket_send_fn_ptr(RETRO_NETPACKET_RELIABLE | RETRO_NETPACKET_FLUSH_HINT, buf, len, client_id);
 }
 
+// Something the player must know about the link (shown for a few seconds).
+void netpacket_message(const char *text) {
+  show_warning_message(text, 4000);
+}
+
 /* The Cable Link players option. Read again when a netplay session starts:
  * it may have been changed in the menu just before, with no frame run since
  * (the frame is what reads the changed options). */
@@ -572,14 +577,20 @@ static void read_cable_players(void) {
    }
 #ifndef GPSP_INSTANCE_B
    dual_set_players(cable_players);
+   /* Automatic unless the user asked for the real time cable: most people
+    * never open the core options. */
+   var.key   = "gpsp_cable_different_games";
+   var.value = NULL;
+   dual_set_other_games(!(environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &var) &&
+                          var.value && !strcmp(var.value, "realtime")));
 #endif
 }
 
-#ifndef GPSP_INSTANCE_B
-/* Everything that makes this GBA a different machine: the dual cable needs
- * the same on every console. (Worked out again for each netplay session:
- * some of it can be changed in the menu.) */
-static u32 dual_machine_cfg(void)
+/* Everything that makes this GBA a different machine: each copy of it on
+ * the other consoles must be the same. (Worked out again for each netplay
+ * session: some of it can be changed in the menu. The hidden GBAs have it
+ * too: dual.c checks that a copy came out as its owner says.) */
+u32 dual_machine_cfg(void)
 {
    u32 i, cfg = 2166136261u;
    /* (Not the boot mode: the link restarts every GBA through the BIOS, see
@@ -596,7 +607,41 @@ static u32 dual_machine_cfg(void)
       cfg = (cfg ^ translation_gate_target_pc[i]) * 16777619u;
    return cfg;
 }
+
+/* The options behind it (dual.h, DUAL_OPT_*): a copy of this GBA on another
+ * console is loaded with these, whatever that console has. */
+u32 dual_machine_opts(void)
+{
+   return ((u32)dynarec_enable & 1) |
+          ((u32)(rtc_mode + 1) & 3) << 1 |
+          ((u32)(rumble_mode + 1) & 3) << 3 |
+          (sound_freq_bits & 31) << 5;
+}
+
+/* The BIOS for a link session: these 16 KB, or the built-in one (NULL).
+ * Only between frames, with the game about to restart (or loaded but not
+ * run yet, for a hidden GBA). */
+static void load_builtin_bios(void);
+void dual_set_bios(const u8 *src)
+{
+   if (src)
+      memcpy(bios_rom, src, sizeof(bios_rom));
+   else
+      load_builtin_bios();
+#ifdef HAVE_DYNAREC
+   /* Not just a flush: the SWI entry point (BIOS 0x8) is translated once,
+    * below the watermark a flush keeps, when the emitter starts (as
+    * reset_gba does it). A hidden GBA is not reset before its state is
+    * loaded: it would go on into the other BIOS through the old entry. */
+#if defined(MMAP_JIT_CACHE)
+   if (rom_translation_cache)
 #endif
+   {
+      init_dynarec_caches();
+      init_emitter(gamepak_must_swap());
+   }
+#endif
+}
 
 static void netpacket_start(uint16_t client_id, retro_netpacket_send_t send_fn, retro_netpacket_poll_receive_t poll_receive_fn) {
   read_cable_players();
@@ -713,7 +758,9 @@ static bool netpacket_connected(uint16_t client_id) {
 }
 
 static void netpacket_disconnected(uint16_t client_id) {
-  netplay_num_clients--;
+  // (Never below zero: nobody could join again for the rest of the session.)
+  if (netplay_num_clients)
+    netplay_num_clients--;
   if (serial_mode == SERIAL_MODE_RFU)
     rfu_net_disconnect(client_id);
 #ifndef GPSP_INSTANCE_B

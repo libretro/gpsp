@@ -18,23 +18,19 @@ first megabyte).
 Every other mode, and Cable Link when the consoles cannot use the dual
 link, works exactly as before.
 
-## Settings that must match
+## Settings
 
-Each console runs a copy of the others' GBAs, so all of them must be the
-very same machine. If anything here differs, the consoles say **"Cable
-Link: games or settings differ, using the real time cable"** and play over
-the real time cable, which is much slower (every transfer waits for the
-network):
+Each console runs a copy of the others' GBAs, and each copy must be the very
+same machine as the GBA it copies. The consoles work that out between them
+when the session starts:
 
-| what | where | note |
-|---|---|---|
-| the game | the ROM file | the very same dump (same CRC): not Europe on one console and USA or Virtual Console on another |
-| BIOS | core option **BIOS** and `system/gba_bios.bin` | with **Auto select** a console uses `gba_bios.bin` if it is in its system folder, and the built-in BIOS if not: either copy the same `gba_bios.bin` to every console, or choose **Builtin BIOS** on all of them |
-| Dynarec | core option **Dynamic Recompiler** | on (or off) everywhere |
-| Sound rate | core option **Sound Output Rate (Hz)** | the same everywhere (the game reads the sound timing) |
-| RTC, Rumble | core options **RTC support**, **Rumble support** | the same everywhere |
-| Cable Link players | core option **Cable Link players** | the same everywhere, or the message is "the consoles have a different number of players" |
-| the core | `gpsp_plus_libretro.so` | the same build on every console (Miyoo Mini, Android, ...) |
+| what | what happens if it differs |
+|---|---|
+| the game | the dual cable is still used when every console has the other games in its ROM folder; otherwise (or with **Cable Link: different games** set to **Real time cable** on the host) the **real time cable** is used, see below |
+| BIOS (core option **BIOS** and `system/gba_bios.bin`) | every GBA uses the **built-in BIOS** for the session (*"the consoles have different BIOS, every GBA uses the built-in one"*); a console that had to switch keeps it until the game is loaded again |
+| Dynarec, Sound rate, RTC, Rumble | nothing: each copy of a GBA runs with the settings of the console it belongs to |
+| Cable Link players | the clients take the host's number (*"Cable Link: N players, as the host has it"*) |
+| the core | the same build is needed on every console (Miyoo Mini, Android, ...) |
 
 Options that only change the picture or the controls (colour correction,
 frame mixing, sprite limit, frameskip, turbo) can differ.
@@ -49,13 +45,49 @@ cable, follow the options as always.
 the consoles are linked (or waiting for the players) do not apply at once:
 the copies of this GBA on the other consoles could not follow, and the link
 would break ("the consoles went out of sync"). The core says "the change
-will be applied when the link ends" and applies it then. (For the next
-session it must be the same on every console again, see the table.)
+will be applied when the link ends" and applies it then.
 
 When the dual link is up every console shows **"Cable Link: both GBAs
 connected (N frames of delay)"** (or "3 GBAs", "4 GBAs"). A local WiFi gives
 2 or 3 frames; netplay through a relay server (tunnel) works but adds the
 relay's delay (about 7 frames with a 80 ms ping).
+
+## Different games
+
+Two different games (Ruby and Sapphire, two editions of Battle Network, the
+Europe and USA versions of one game, or a game and its Virtual Console dump:
+any two ROMs that are not byte for byte the same) go on the **dual cable**
+too when every console has them, with nothing to set up (most people never
+open the core options): each console looks for the other players' games in
+the folder of its own ROM and runs them too. Every screen then goes at full
+speed; the start takes a little longer (the other games are read from the
+card) and each one needs memory (as much as its ROM: the
+copies of the same game share it). A game is found by its whole contents,
+never by its name:
+
+1. `system/gpsp_plus_roms.txt`, an index of the games found before (a line
+   per game: hash, size, quick hash, path), written by the core;
+2. the file with the other player's file name, in the same folder;
+3. the folder: the 16 `.gba`/`.bin` files named most like the other
+   player's file (or like this console's own: another region or edition),
+   then the others for half a second at most. Only the files of the right
+   size are opened, and only their header (one sector) is read; the ones
+   with the right header have their first and last 32 KB compared, and the
+   one that matches is loaded and checked whole (a game and its Virtual
+   Console dump can share all of that). (Asking for the size of each file of
+   a folder with thousands of games took 30 seconds on a Miyoo Mini, FAT32,
+   the game frozen: hence the order and the limit. A game with quite another
+   name in a huge folder may not be found: the real time cable is used.)
+
+If a console does not have the game (or has no room for it, Miyoo Mini Plus:
+128 MB in all) every console uses the real time cable (*"a console does not
+have the other game"*, *"not enough memory for the other game"*).
+
+The core option **Cable Link: different games** (the host's value counts) is
+**Automatic** by default, which is all of the above. **Real time cable**
+never looks for the other games: different games start right away on the
+real time cable (*"Cable Link: different games, using the real time
+cable"*).
 
 ## How a session goes
 
@@ -64,15 +96,21 @@ Link for every game without a Wireless Adapter, Pokemon or Advance Wars mode
 of its own) and the same number of players, and starts a netplay session
 (host and clients) as usual.
 
-1. Each client compares ROM, BIOS, link protocol version, number of
-   players and the settings that change the machine with the host. If anything differs, the
-   real time cable is used instead, for everybody, with a message (and each
-   client restarts its game then, as games only look for the cable at boot).
-   (Which game it is, and the other GBAs, are worked out when the session
-   starts: the host does it while it waits for the clients.)
+1. Each client tells the host its game, BIOS and settings, and takes the
+   host's number of players. Different games that the dual cable cannot
+   take (see above) make everybody use the real time cable, with a message
+   (and each client restarts its game then, as games only look for the cable at boot). Another version of the
+   link (another build of the core) cannot be talked to at all, by either
+   cable: the consoles say "the other console has another version of this
+   core" and play on unplugged. (Which game it is, and the
+   other GBAs, are worked out when the session starts: the host does it
+   while it waits for the clients.)
 2. Until all the players are there the games go on, and every console shows
    "waiting for players (2/4)" and so on each time one comes.
-3. With everybody there, the host measures the round trip to each client
+3. With everybody there, the host tells everybody each player's game and
+   settings, and each console gets its copies of the other GBAs ready (with
+   their owners' settings, and their games if they differ). Then the host
+   measures the round trip to each client
    (input delay = one way + 1.6 frames, rounded up, at least 2; with 3 or 4
    players a frame more, as the buttons between two clients go through the
    host).
@@ -82,8 +120,9 @@ of its own) and the same number of players, and starts a netplay session
    keeps their own save. The host is player 1, the clients follow in the
    order they came.
 5. From then on only the buttons are sent. Every 2 seconds the consoles
-   compare all the GBAs; if they differ in two checks in a row the link is
-   cut with a message. (Consoles of different kinds, such as a Miyoo Mini
+   compare all the GBAs (a hash of all the memory a game can see, 400 KB
+   per GBA, a word at a time); if they differ in two checks in a row the
+   link is cut with a message. (Consoles of different kinds, such as a Miyoo Mini
    and an Android phone, can differ for a moment in CPU flags that nothing
    reads; a GBA that really went another way stays different.)
 6. Every console shows the same frame at the same time (screen and sound go
@@ -101,14 +140,19 @@ of its own) and the same number of players, and starts a netplay session
 A reset while linked goes with the buttons: every console restarts every
 game in the same frame, the cable still plugged in.
 
+The GBAs of a console wait for each other all the time, for microseconds.
+Should one ever wait for whole seconds (5), the other is not coming: rather
+than hanging the frontend for good, the cable is cut, every GBA finishes
+its frame alone and the session stops with a message.
+
 While linked, savestates cannot be loaded, cheats are off and fast forward
 is disabled: all of them would make the copies of a GBA different. When a
 console leaves, each player's GBA carries on alone.
 
 ## Different games, and programs sent through the cable
 
-Two different games (Metroid Zero Mission and Metroid Fusion, Ruby and
-Sapphire...) play over the real time cable. Some of them send a program
+Two different games (Metroid Zero Mission and Metroid Fusion...) play over
+the real time cable when the dual cable cannot take them (see above). Some of them send a program
 to the other GBA with the BIOS (MultiBoot): Zero Mission's Fusion link
 sends one to a Fusion console started with **Start+Select held** while the
 BIOS boots (boot mode **Boot to BIOS**), and single cartridge multiplayer
@@ -125,6 +169,59 @@ started its own cartridge), and the other console sat in its BIOS waiting.
 A console that is a client of the netplay session also sends its cable
 status again now and then: RetroArch netplay 8 drops what a client sends
 before it is a player, and the host would otherwise go on without it.
+
+## The real time cable
+
+Over the real time cable each transfer needs the other console's word, a
+network round trip away. A child sends its next word as soon as its game
+left it alone for a moment after a transfer, once that has been the right
+one many times in a row, and says now and then that it still holds; when
+the parent starts the next transfer with it already there, and recent
+enough (the child said it held up to a frame and a half before), it takes
+it (and says so: both ends agree on what the wire had) and does not wait at
+all. Games that make a transfer every frame or so (menus, races) then run
+at full speed: Mario Kart Super Circuit, Europe against USA, 8 ms each way:
+60 frames a second in menus and races (it was about 40 before). A word the
+game changes in that last frame and a half goes one transfer late, as a
+word loaded a moment too late on a real cable (Mario Kart does it once or
+twice per session, between screens, and does not mind).
+
+A burst of transfers where each word answers the one before, as in a
+handshake screen (Mario Kart's "Multi-Pak Link" screen: about 9 a frame, the
+child echoing the parent), still costs a round trip each: 17 frames a second
+with 8 ms each way, 34 with 3 ms. Nothing but the other game itself could
+tell what it answers (a guess that is wrong now and then made Mario Kart
+lose the link later on): that is what the dual cable is for.
+
+A WiFi hiccup (home WiFi often holds packets for 100 ms or more now and
+then, power saving) stops the child until the parent's clock gets through;
+it then runs an extra frame now and then until it is back where it should
+be, instead of staying behind for good (the parent would wait for all of
+that the next time it needs its word). A parent that does not wait can be
+frames ahead: the child still gives its game the time the parent had
+between two transfers, even more than a frame (Mario Kart between screens),
+or the game has no time to load its word.
+
+While the network holds everything back, both ends wait: up to a second.
+Giving up earlier loses the link: the game then gets a console that is not
+there, or (a child that stops following the parent's clock) runs on alone
+with no transfers. With a 400 ms stall now and then, Mario Kart lost the
+link every time when the child gave up after 250 ms, and never with a
+second. A console that really stopped (paused, in the menu) freezes the
+other one for that second, once.
+
+A wait spins for the first millisecond (the answer is usually that close on
+a wired or simulated network), then takes naps of 0.1 ms: a CPU core
+spinning through every round trip was most of what this cable cost. (Where
+such a nap takes milliseconds, a system with coarse timers, it notices and
+goes on spinning: the Miyoo Mini's kernel has no high resolution timers,
+any sleep takes 10 to 20 ms there.) Both consoles of a session on one PC, Mario Kart, 8 ms
+each way: 69% of a core before, 29% now, at the same frames a second.
+
+Two Android handhelds over a home WiFi with such hiccups (ping 3-240 ms):
+about 45 frames a second in menus and races, the old core and this one
+alike (the hiccups set the pace), 46 on the "Multi-Pak Link" screen (41
+before), the link holds every time.
 
 ## Code
 
@@ -197,6 +294,19 @@ whose cable prints what it does; `DUAL_FAULT=1` with it gives a hidden GBA
 other buttons once, to check that the agreement check catches it.
 `SERIAL=auto` (or any other value of the option) changes the link mode,
 `ROM2=...` gives client 1 another game (the real time cable must take over).
+`CORE1=file` gives client 1 another build of the core (two versions of the
+link that meet: each new one says so, the games go on unplugged).
+`OTHER=1` sets **Cable Link: different games** to Automatic (the harness defaults to the real time cable, unlike the core).
+`LINKLOG=dir` saves each console's link test log (`dir/cN.link`) and
+`LINKLOG_RESET=n` empties them at frame n of each console (the host's fills
+up with lone transfers before the clients are there): with the real time
+cable the logs cover other stretches of time, so compare them by the
+parent's word of each transfer, which counts up.
+`NET=listen:PORT` / `NET=IP:PORT` (with `PACE=1`) runs only the host or only
+client 1, the other end being another process over TCP, on another device
+(built with the Android NDK it runs from `adb shell` in `/data/local/tmp`):
+the real time cable over a real network. `KEYS1` still names client 1's
+buttons on its own end; `KEEPALIVE_US=n` adds an empty packet every n µs.
 `BIOSDIR=dir` uses the official BIOS (`dir/gba_bios.bin`; `BUILTIN1=1` keeps
 console 1 on the built-in one), `BOOT=bios` boots
 through it (hold Start+Select there with `KEYS1` to boot multiboot), `SAV0=file`

@@ -142,7 +142,7 @@ struct retro_core_option_definition option_defs_us[] = {
    {
       "gpsp_cable_players",
       "Cable Link players",
-      "How many GBAs are on the Cable Link (every console must have the same value). The host waits for all of them before the games restart, once. Each console runs every GBA, so 3 or 4 need more memory and CPU.",
+      "How many GBAs are on the Cable Link (the host's value counts, the clients take it). The host waits for all of them before the games restart, once. Each console runs every GBA, so 3 or 4 need more memory and CPU.",
       {
          { "2", NULL },
          { "3", NULL },
@@ -150,6 +150,17 @@ struct retro_core_option_definition option_defs_us[] = {
          { NULL, NULL },
       },
       "2"
+   },
+   {
+      "gpsp_cable_different_games",
+      "Cable Link: different games",
+      "When the consoles have different games (another edition, region or dump). Automatic: each console looks for the other games in the folder of its own ROM and runs them too (dual cable: every screen at full speed, a slightly longer start); if a console does not have them, or has no memory for them, the real time cable is used. Real time cable: never look for the other games. The host's value counts.",
+      {
+         { "auto",     "Automatic" },
+         { "realtime", "Real time cable" },
+         { NULL, NULL },
+      },
+      "auto"
    },
    {
       "gpsp_rumble",
