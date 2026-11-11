@@ -105,6 +105,7 @@ bool dual_take_boot_reset(void) {
 
 void dual_request_reset(void) {}
 int dual_frame_begin(uint32_t local_keys) { return DUAL_FRAME_RUN; }
+uint32_t dual_audio_stretch(void) { return 0; }
 void dual_b_frame_start(void) {}
 void dual_b_frame_wait(void) {}
 void dual_frame_end(void) {}

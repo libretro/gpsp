@@ -18,7 +18,10 @@
  * NET=listen:PORT or NET=IP:PORT (needs PACE=1): only one console here, the
  * host or the client, and the other one in another process (another device)
  * over TCP, to measure the cable on a real network.
- * PACE=1 runs each console at 59.73 frames a second, as on the real ones
+ * PACE=1 runs each console at 59.73 frames a second, as on the real ones;
+ * PACE=audio at the speed its sound plays, as a frontend with audio sync
+ * (what the dual cable's time sync works through). AUDIOLOG=dir saves each
+ * console's sound (dir/cN.raw, and dir/cN.alog: time, frame and samples).
  * (SKEW_PPM=n: the clients' clocks are n parts per million faster, client k
  * k times), BW_KBPS=n gives the network that bandwidth each way, JITTER_MS=n
  * delays each packet up to n ms more (in order, as TCP); SPIKE_MS=n with
@@ -517,6 +520,27 @@ static void video(int who, const void *data, unsigned w, unsigned h, size_t pitc
   }
 }
 
+/* What a console's core gives as sound. PACE=audio counts it (the console
+ * then takes as long as its sound lasts); AUDIOLOG=dir saves it (dir/cN.raw,
+ * 16 bit stereo) with dir/cN.alog: a line per batch, "time_us frame samples". */
+static volatile unsigned audio_given[MAXCON];
+static void audio_log(int who, const int16_t *d, size_t f) {
+  static FILE *raw[MAXCON], *log[MAXCON];
+  const char *dir = getenv("AUDIOLOG");
+  audio_given[who] += (unsigned)f;
+  if (!dir) return;
+  if (!raw[who]) {
+    char path[512];
+    snprintf(path, sizeof(path), "%s/c%d.raw", dir, who);
+    raw[who] = fopen(path, "wb");
+    snprintf(path, sizeof(path), "%s/c%d.alog", dir, who);
+    log[who] = fopen(path, "w");
+  }
+  if (!raw[who] || !log[who]) return;
+  fwrite(d, 4, f, raw[who]);
+  fprintf(log[who], "%lld %u %u\n", (long long)now_us(), con[who].frames_shown, (unsigned)f);
+}
+
 static int16_t input_state(int who, unsigned port, unsigned dev, unsigned idx, unsigned id) {
   if (port || dev != RETRO_DEVICE_JOYPAD) return 0;
   if (id == RETRO_DEVICE_ID_JOYPAD_MASK) return (int16_t)con[who].keys;
@@ -529,7 +553,7 @@ static int16_t input_state(int who, unsigned port, unsigned dev, unsigned idx, u
   static int16_t input##n(unsigned p, unsigned d, unsigned i, unsigned id) { return input_state(n, p, d, i, id); } \
   static void np_send##n(int f, const void *b, size_t l, uint16_t c) { net_send(n, f, b, l, c); } \
   static void np_poll##n(void) { net_poll(n); } \
-  static size_t audio##n(const int16_t *d, size_t f) { con[n].sound = true; return f; } \
+  static size_t audio##n(const int16_t *d, size_t f) { con[n].sound = true; audio_log(n, d, f); return f; } \
   static void corelog##n(enum retro_log_level l, const char *fmt, ...) \
     { va_list ap; va_start(ap, fmt); core_log(n, l, fmt, ap); va_end(ap); }
 CBSET(0)
@@ -662,6 +686,7 @@ static struct {
   unsigned frames;
   double ppm;
   volatile int stop, half;
+  int audio;
   unsigned dupe_half[MAXCON], held_half[MAXCON];
   volatile int64_t t_last[MAXCON];
   double period[MAXCON];
@@ -687,10 +712,18 @@ static void *pace_main(void *arg) {
       uint32_t *m = con[i].get_memory_data(RETRO_MEMORY_SYSTEM_RAM);
       if (m) m[0] = 0;
     }
+    audio_given[i] = 0;
     con[i].run();
     t = now_us();
     pace.t_last[i] = t;
-    next += period;
+    if (pace.audio) {
+      /* As a frontend with audio sync and no vsync: a frame lasts what its
+       * sound does (a millisecond if it gave none, then it is asked again). */
+      const double rate = getenv("SOUND") ? atof(getenv("SOUND")) : 65536.0;
+      next += audio_given[i] ? audio_given[i] / rate * period * 59.7275 : 1000.0;
+    }
+    else
+      next += period;
     if (next < t - period) next = t;      /* missed a frame */
     if (!pace.t_start[i] && con[i].frames_shown)
       pace.t_start[i] = t;
@@ -872,6 +905,7 @@ int main(int argc, char **argv) {
     pace.t0 = now_us();
     pace.frames = frames;
     pace.ppm = getenv("SKEW_PPM") ? atof(getenv("SKEW_PPM")) : 0;
+    pace.audio = !strcmp(getenv("PACE"), "audio");
     for (i = 0; i < ncon; i++) {
       pace.period[i] = 1e6 / 59.7275 * (1 - i * pace.ppm / 1e6);
       pace.diff_min[i] = 1e9;

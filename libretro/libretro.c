@@ -438,7 +438,79 @@ void set_fastforward_override(bool fastforward)
    environ_cb(RETRO_ENVIRONMENT_SET_FASTFORWARDING_OVERRIDE, &ff_override);
 }
 
-static void audio_run(void)
+/* Workaround for a RetroArch audio driver
+ * limitation: a maximum of 1024 frames
+ * can be written per call of audio_batch_cb(),
+ * so we have to send samples in chunks */
+static void audio_push(const s16 *samples, u32 frames)
+{
+   while (frames > 0)
+   {
+      u32 frames_to_write = (frames > AUDIO_BATCH_FRAMES_MAX) ?
+            AUDIO_BATCH_FRAMES_MAX : frames;
+
+      audio_batch_cb(samples, frames_to_write);
+
+      frames  -= frames_to_write;
+      samples += frames_to_write << 1;
+   }
+}
+
+#ifndef GPSP_INSTANCE_B
+/* Dual Cable Link, keeping both consoles together through the sound (with
+ * audio sync, the frontend runs as fast as the sound it is given plays).
+ *
+ * A console that is a little ahead of the other makes its sound slightly
+ * longer: the samples of a frame, resampled into a few more (1.2% at most,
+ * a fifth of a semitone: not heard). No frame is lost and the sound never
+ * stops. A frame that must be held back whole (rare: see dual_frame_begin)
+ * has no sound of its own; it gets the end of the last one played backwards
+ * and fading out, and the next one fades in, so that nothing clicks. */
+#define AUDIO_STRETCH_MAX  64    /* Most samples added to a frame */
+#define AUDIO_FADE_FRAMES  256   /* (4 ms at 65536 Hz) */
+
+static s16 audio_stretch_buffer[(GBA_SOUND_FREQUENCY / 59 + 1 + AUDIO_STRETCH_MAX) * 2];
+static s16 audio_last_sample[2];    /* The last one given to the frontend */
+static u32 audio_last_frames;       /* Samples of the last frame (still in
+                                     * audio_sample_buffer) */
+static float audio_stretch_accumulator;
+static bool audio_fade_in;
+
+/* `frames` samples into a few more, in audio_stretch_buffer: linear, from
+ * the last sample of the frame before to the last one of this frame, so
+ * that consecutive frames join. Returns how many came out. */
+static u32 audio_stretch(const s16 *in, u32 frames, u32 ppm)
+{
+   s16 *out = audio_stretch_buffer;
+   u32 extra, total, step, pos, i;
+
+   audio_stretch_accumulator += (float)frames * (float)ppm / 1000000.0f;
+   extra = (u32)audio_stretch_accumulator;
+   audio_stretch_accumulator -= (float)extra;
+   if (extra > AUDIO_STRETCH_MAX)
+      extra = AUDIO_STRETCH_MAX;
+   if (!extra || frames < 2)
+      return 0;
+
+   total = frames + extra;
+   step  = (frames << 16) / total;       /* 16.16, just under 1 */
+   for (i = 0, pos = step; i < total; i++, pos += step)
+   {
+      /* Sample pos - 1 of the frame (-1 is the last one of the frame before) */
+      const u32 idx    = pos >> 16;
+      const s32 frac   = (s32)((pos & 0xFFFF) >> 1);   /* (15 bits: no overflow) */
+      const s16 *a     = idx ? &in[(idx - 1) << 1] : audio_last_sample;
+      const s16 *b     = &in[(idx < frames ? idx : frames - 1) << 1];
+      out[i << 1]       = (s16)(a[0] + (((b[0] - a[0]) * frac) >> 15));
+      out[(i << 1) + 1] = (s16)(a[1] + (((b[1] - a[1]) * frac) >> 15));
+   }
+   return total;
+}
+#endif
+
+/* stretch_ppm: how much longer this frame's sound must be (Dual Cable Link,
+ * parts per million; 0 anywhere else). */
+static void audio_run(u32 stretch_ppm)
 {
    s16 *audio_buffer_ptr;
    u32 samples_to_read;
@@ -469,38 +541,75 @@ static void audio_run(void)
    }
 
    samples_produced = sound_read_samples(audio_sample_buffer, samples_to_read);
-
-   /* Workaround for a RetroArch audio driver
-    * limitation: a maximum of 1024 frames
-    * can be written per call of audio_batch_cb(),
-    * so we have to send samples in chunks */
    audio_buffer_ptr = audio_sample_buffer;
-   while (samples_produced > 0)
+
+#ifndef GPSP_INSTANCE_B
+   if (samples_produced)
    {
-      u32 samples_to_write = (samples_produced > AUDIO_BATCH_FRAMES_MAX) ?
-            AUDIO_BATCH_FRAMES_MAX : samples_produced;
+      const s16 *last = &audio_sample_buffer[(samples_produced - 1) << 1];
+      const s16 last_l = last[0], last_r = last[1];
 
-      audio_batch_cb(audio_buffer_ptr, samples_to_write);
+      if (audio_fade_in)
+      {
+         /* The frame before was held back (audio_hold_run) */
+         u32 i, fade = MIN(samples_produced, AUDIO_FADE_FRAMES);
+         for (i = 0; i < fade; i++)
+         {
+            s16 *smp = &audio_sample_buffer[i << 1];
+            smp[0]   = (s16)((smp[0] * (s32)i) / (s32)fade);
+            smp[1]   = (s16)((smp[1] * (s32)i) / (s32)fade);
+         }
+         audio_fade_in        = false;
+         audio_last_sample[0] = audio_last_sample[1] = 0;
+      }
 
-      samples_produced -= samples_to_write;
-      audio_buffer_ptr += samples_to_write << 1;
+      audio_last_frames = samples_produced;
+      if (stretch_ppm)
+      {
+         u32 stretched = audio_stretch(audio_sample_buffer, samples_produced, stretch_ppm);
+         if (stretched)
+         {
+            audio_buffer_ptr = audio_stretch_buffer;
+            samples_produced = stretched;
+         }
+      }
+      else
+         audio_stretch_accumulator = 0.0f;
+
+      audio_last_sample[0] = last_l;
+      audio_last_sample[1] = last_r;
    }
+#endif
+
+   audio_push(audio_buffer_ptr, samples_produced);
 }
 
 #ifndef GPSP_INSTANCE_B
-/* A frame of silence: a frame held back by the Dual Cable Link takes as long
- * as any other one (with audio sync, a frame with no sound takes no time). */
-static void audio_silence_run(void)
+/* A frame held back by the Dual Cable Link takes as long as any other one
+ * (with audio sync, a frame with no sound takes no time). It has no sound of
+ * its own: the end of the last frame's goes backwards (so it joins what was
+ * just heard) and fades out into silence. */
+static void audio_hold_run(void)
 {
-   static const s16 zeros[AUDIO_BATCH_FRAMES_MAX * 2];
+   s16 *out    = audio_stretch_buffer;
    u32 samples = (u32)audio_samples_per_frame;
+   u32 fade    = MIN(audio_last_frames, AUDIO_FADE_FRAMES);
+   u32 i;
 
-   while (samples > 0)
+   if (!audio_sample_buffer)
+      return;
+
+   memset(out, 0, samples * 2 * sizeof(s16));
+   for (i = 0; i < fade && i < samples; i++)
    {
-      u32 samples_to_write = MIN(samples, AUDIO_BATCH_FRAMES_MAX);
-      audio_batch_cb(zeros, samples_to_write);
-      samples -= samples_to_write;
+      const s16 *src    = &audio_sample_buffer[(audio_last_frames - 1 - i) << 1];
+      out[i << 1]       = (s16)((src[0] * (s32)(fade - i)) / (s32)fade);
+      out[(i << 1) + 1] = (s16)((src[1] * (s32)(fade - i)) / (s32)fade);
    }
+   audio_last_frames = 0;
+   audio_fade_in     = true;
+
+   audio_push(out, samples);
 }
 #endif
 
@@ -1799,7 +1908,7 @@ static void retro_run_dual(void)
       break;
    case DUAL_FRAME_HOLD:
       /* Ahead of the other console: this frame waits. */
-      audio_silence_run();
+      audio_hold_run();
       video_cb(NULL, GBA_SCREEN_WIDTH, GBA_SCREEN_HEIGHT, GBA_SCREEN_PITCH * 2);
       return;
    default:
@@ -1831,7 +1940,7 @@ static void retro_run_dual(void)
      rumble_cb(0, RETRO_RUMBLE_STRONG, MIN(strength, 0xffff) / 2);
    }
 
-   audio_run();
+   audio_run(dual_audio_stretch());
    video_run();
 
    if (environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE_UPDATE, &updated) && updated)
@@ -1924,7 +2033,7 @@ void retro_run(void)
    }
 
    while (audio_frames--)
-      audio_run();
+      audio_run(0);
    video_run();
 
    switch (serial_mode) {

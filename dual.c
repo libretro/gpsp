@@ -229,6 +229,14 @@ static int *const hid_dynarec[DUAL_HIDDEN] = {
 #define DUAL_SYNC_WIN      16          // Packets a peer's position comes from
 #define DUAL_SYNC_US       (DUAL_FRAME_US * 5 / 8)   // Ahead by more: wait
 #define DUAL_SYNC_GAP      60          // Frames between two waits
+// Before it comes to that, the console that is ahead makes a few samples of
+// sound more out of each frame: the frontend takes that much longer to play
+// them, and both consoles come together with no frame lost (see
+// dual_audio_stretch). Nothing below DUAL_STRETCH_MIN ahead, all of it
+// (DUAL_STRETCH_PPM, a sixth of a semitone at most) from DUAL_STRETCH_FULL.
+#define DUAL_STRETCH_MIN   (DUAL_FRAME_US / 16)
+#define DUAL_STRETCH_FULL  (DUAL_FRAME_US * 3 / 8)
+#define DUAL_STRETCH_PPM   12000
 #define DUAL_DELAY_MORE    4           // Most frames added to the input delay
 #define DUAL_DELAY_CALM_US 60000000    // Peers happy this long: one frame less
 #define DUAL_DELAY_CALM_MAX 600000000  // (twice as long each time that was wrong)
@@ -366,6 +374,7 @@ static struct {
   u32 peer_pos_n[NP];
   s32 peer_lead[NP];            // How far ahead of us each peer says it is
   u32 sync_next;                // No waiting before this frame
+  s32 stretch_ppm;              // Sound made longer to fall back (see above)
 } ds = { .players = 2, .cfg_players = 2 };
 
 void netpacket_send(uint16_t client_id, const void *buf, size_t len);
@@ -1610,6 +1619,7 @@ static void dual_start_running(void) {
   ds.t_lowered = 0;
   ds.calm_us = DUAL_DELAY_CALM_US;
   ds.sync_next = DUAL_SYNC_GAP;
+  ds.stretch_ppm = 0;
   ds.reset_wanted = false;
   for (s = 0; s < NP; s++)
     ds.t_heard[s] = netpacket_time_usec();
@@ -2075,6 +2085,17 @@ int dual_frame_begin(u32 local_keys) {
       if (ds.peer_pos_n[s] < DUAL_SYNC_WIN)
         full = false;
     }
+  // A little ahead: the sound of the next frames gets longer (smoothly:
+  // the pitch must not be heard to move). This is what keeps the consoles
+  // together; the held frame below is for what it cannot make up (a jump
+  // after the network had a bad moment, a frontend with no audio sync).
+  {
+    s32 want = 0;
+    if (full && ahead > DUAL_STRETCH_MIN)
+      want = (s32)MIN((s64)(ahead - DUAL_STRETCH_MIN) * DUAL_STRETCH_PPM /
+                      (DUAL_STRETCH_FULL - DUAL_STRETCH_MIN), DUAL_STRETCH_PPM);
+    ds.stretch_ppm = (ds.stretch_ppm * 7 + want) / 8;
+  }
   if (f >= ds.sync_next && full && ahead > DUAL_SYNC_US) {
     ds.sync_next = f + DUAL_SYNC_GAP;
     return DUAL_FRAME_HOLD;
@@ -2152,6 +2173,11 @@ int dual_frame_begin(u32 local_keys) {
     hid_if[0].set_keys(ds.keys[hidden_slot(0)][fi] ^ 0x1);
 #endif
   return DUAL_FRAME_RUN;
+}
+
+// How much longer the sound of this frame must be (parts per million).
+uint32_t dual_audio_stretch(void) {
+  return ds.state == DS_RUN ? (uint32_t)ds.stretch_ppm : 0;
 }
 
 void dual_b_frame_start(void) {
