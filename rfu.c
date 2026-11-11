@@ -19,6 +19,59 @@
 
 #include "common.h"
 
+// Packets waiting to be read by the game, per peer. Over TCP the network
+// delivers them in bursts, faster than the game polls the adapter: with
+// only 4 slots the extra ones were dropped. A full queue drops packets (link
+// error), and a WiFi that holds packets for a moment (Miyoo Mini <-> Android)
+// delivers them all at once: room for a few hundred ms of them. The latency
+// is kept down by the skipping below, not by the size.
+#define RFU_PKT_QUEUE_SIZE 32
+
+// The host's queues are for bursts, not a standing delay. The host's game
+// reads one packet per client each exchange, and a client answers each
+// exchange with one packet: when an answer came too late for its exchange
+// (the host saw none) it stays queued for good, and from then on every packet
+// of that client is read an exchange late. TCP bursts piled that up to the 16
+// slots: the client's trainer took ages to move in the Pokemon link rooms
+// (and a full queue drops packets: link error).
+// A packet with data is never dropped: games number them (Pokemon cuts the
+// link after a few missing ones). But an answer with no command in it is all
+// zero after its 2 byte header (librfu UNI frame, which the game ignores). If
+// the queue of a client never went below RFU_PKT_STALE_MIN packets during
+// RFU_PKT_STALE_READS reads, that many packets minus one are owed, and are
+// taken from the empty ones anywhere in the queue (never the last one: the
+// host still gets an answer from that client; the packets with data keep
+// their order). Short windows: with a bursty network (Android frontends run
+// frames in bursts, WiFi spikes) the queue only stays up for a moment, and a
+// long window never saw it stay up, so nothing was skipped (~4 frames late).
+#define RFU_PKT_STALE_READS 15
+#define RFU_PKT_STALE_MIN    2
+
+// A client gets the host's packets one per frame, as from a real adapter
+// (the host sends one a frame), not in the bursts the network delivers them
+// in. Pokémon needs it: its client queues each packet to answer it on its
+// next frame, and drops the player's buttons while more than one answer is
+// waiting (UpdateHeldKeyCode), so bursts made the client ignore the pad.
+// With more than this many packets waiting, a second one per frame goes too
+// (the host is a bit faster, or a burst was long): the queue never fills.
+#define RFU_CLIENT_BACKLOG   4
+
+// When the host gives up on a late answer, the answer queues up behind the
+// next ones for good (it can't be skipped: it has the client's commands): a
+// frame more of lag for the client. Up to RFU_HOST_SLACK of those are let
+// be (they absorb the usual jitter of the network, and the screens keep
+// running smoothly); past that, the host waits for a client that answers
+// steadily (an answer was there for this many of its last 16 reads), up to
+// RFU_HOST_WAIT_FRAMES, as both GBAs would stall on a real link.
+#define RFU_HOST_SLACK       4
+#define RFU_HOST_STEADY_MIN  14
+#define RFU_HOST_WAIT_FRAMES 10
+
+// While the game waits for an event the network is read every this many
+// cycles (~68 times per frame, 0.24ms), not on every scheduler event: each
+// read is a system call, and there are hundreds of events per frame.
+#define RFU_POLL_CYCLES    4096
+
 // Debug print logic:
 #ifdef RFU_DEBUG
   #define RFU_DEBUG_LOG(...) printf(__VA_ARGS__)
@@ -36,12 +89,12 @@
 
 // Unpacks big endian integers used for signaling
 static inline u32 upack32(const u8 *ptr) {
-  return ptr[3] | (ptr[2] << 8) | (ptr[1] << 16) | (ptr[0] << 24);
+  return ptr[3] | (ptr[2] << 8) | (ptr[1] << 16) | ((u32)ptr[0] << 24);
 }
 
 // Unpacks payload data, which is little-endian
 static inline u32 leupack32(const u8 *ptr) {
-  return ptr[0] | (ptr[1] << 8) | (ptr[2] << 16) | (ptr[3] << 24);
+  return ptr[0] | (ptr[1] << 8) | (ptr[2] << 16) | ((u32)ptr[3] << 24);
 }
 
 // The following commands, names and bit fields are not a 100% known.
@@ -120,6 +173,8 @@ static u32 rfu_comstate, rfu_cnt, rfu_state;
 static u32 rfu_buf[255];
 static u8 rfu_cmd, rfu_plen;
 static u32 rfu_timeout_cycles, rfu_resp_timeout;
+static u32 rfu_late_cycles;   // How long the host may still wait for a client
+static u32 rfu_poll_cycles;
 static u8 rfu_timeout, rfu_rtx_max;
 
 static struct {
@@ -135,10 +190,15 @@ static struct {
     u16 client_id;   // libretro client ID
     u16 devid;       // Host-assigned device ID
     u16 clttl;       // Client TTL (to check for disconnects)
+    u8 qmin;         // Shortest queue during the last reads...
+    u8 qreads;       // ...(how many)
+    u8 qowed;        // Empty packets that may still be skipped
+    u16 recent;      // A bit per read (newest lowest): an answer was there
+    u8 slack;        // Late answers let queue up (RFU_HOST_SLACK)
     struct {
       u32 datalen;   // Byte count of data waiting to be polled.
       u8  data[16];  // Data received from client.
-    } pkts[4];
+    } pkts[RFU_PKT_QUEUE_SIZE];
   } clients[4];      // Connected clients IDs (zero means empty slot).
 } rfu_host;
 
@@ -146,11 +206,12 @@ static struct {
   u16 devid;         // Device ID assigned to the client (by the host?)
   u16 clnum;         // Client number (0 to 3)
   u16 host_id;       // Client ID for the host device.
-  // Store host recevied packets (up to 8!)
+  u8 frame_reads;    // Host packets the game read this frame.
+  // Store host received packets
   struct {
     u16 hblen;       // Bytes received from the host.
     u8 hdata[128];   // Data received from the host (accumulated).
-  } pkts[4];
+  } pkts[RFU_PKT_QUEUE_SIZE];
 } rfu_client;
 
 typedef struct {
@@ -235,6 +296,7 @@ void rfu_reset() {
   rfu_comstate = RFU_COMSTATE_RESET;
   rfu_timeout_cycles = 0;
   rfu_resp_timeout = 0;
+  rfu_late_cycles = 0;
   rfu_timeout = RFU_DEF_TIMEOUT;
   rfu_rtx_max = RFU_DEF_RTXMAX;
   memset(&rfu_host, 0, sizeof(rfu_host));
@@ -257,6 +319,45 @@ static u16 new_devid() {
     u16 n = rand_gen() ^ (u16)cpu_ticks;
     if (n)
       return n;
+  }
+}
+
+// Client slot `c` is about to be read: skips stale empty packets in its
+// queue (see RFU_PKT_STALE_READS).
+static void rfu_host_skip_stale(u32 c) {
+  u32 n = 0, j;
+  while (n < RFU_PKT_QUEUE_SIZE && rfu_host.clients[c].pkts[n].datalen)
+    n++;
+
+  if (!rfu_host.clients[c].qreads || n < rfu_host.clients[c].qmin)
+    rfu_host.clients[c].qmin = n;
+  if (++rfu_host.clients[c].qreads >= RFU_PKT_STALE_READS) {
+    rfu_host.clients[c].qreads = 0;
+    rfu_host.clients[c].qowed = 0;
+    if (rfu_host.clients[c].qmin >= RFU_PKT_STALE_MIN)
+      rfu_host.clients[c].qowed = rfu_host.clients[c].qmin - 1;
+  }
+
+  j = 0;
+  while (rfu_host.clients[c].qowed && j + 1 < n) {
+    const u32 len = MIN(16, rfu_host.clients[c].pkts[j].datalen);
+    bool empty = len > 2;
+    u32 k;
+    for (k = 2; k < len && empty; k++)
+      if (rfu_host.clients[c].pkts[j].data[k])
+        empty = false;
+    if (!empty) {
+      j++;
+      continue;
+    }
+    RFU_DEBUG_LOG("Host skips a stale empty packet (client slot %d)\n", c);
+    if (rfu_host.clients[c].slack)
+      rfu_host.clients[c].slack--;
+    memmove(&rfu_host.clients[c].pkts[j], &rfu_host.clients[c].pkts[j + 1],
+            (RFU_PKT_QUEUE_SIZE - 1 - j) * sizeof(rfu_host.clients[c].pkts[0]));
+    rfu_host.clients[c].pkts[RFU_PKT_QUEUE_SIZE - 1].datalen = 0;
+    rfu_host.clients[c].qowed--;
+    n--;
   }
 }
 
@@ -450,12 +551,15 @@ static s32 rfu_process_command() {
     if (rfu_state == RFU_STATE_HOST) {
       // Read data to be sent into the TX buffer
       rfu_tx_buf.blen = rfu_buf[0] & 0x7F;
-      memcpy(rfu_tx_buf.buf, &rfu_buf[1], (rfu_plen - 1)*sizeof(u32));
+      // (The command length comes from the game: never past the buffer)
+      memcpy(rfu_tx_buf.buf, &rfu_buf[1],
+             MIN(rfu_plen - 1, sizeof(rfu_tx_buf.buf) / sizeof(u32)) * sizeof(u32));
     }
     else if (rfu_state == RFU_STATE_CLIENT) {
       // Same as above, but the header encoding is funny
       rfu_tx_buf.blen = (rfu_buf[0] >> (8 + rfu_client.clnum * 5)) & 0x1F;
-      memcpy(rfu_tx_buf.buf, &rfu_buf[1], (rfu_plen - 1)*sizeof(u32));
+      memcpy(rfu_tx_buf.buf, &rfu_buf[1],
+             MIN(rfu_plen - 1, sizeof(rfu_tx_buf.buf) / sizeof(u32)) * sizeof(u32));
     }
 
     /* fallthrough */
@@ -493,7 +597,12 @@ static s32 rfu_process_command() {
       u8 tmpbuf[16*4] = {0};
       rfu_buf[cnt++] = 0;   // Header contains byte counts as a bitfield.
       for (i = 0; i < 4; i++) {
-        u32 dlen = MIN(16, rfu_host.clients[i].pkts[0].datalen);
+        u32 dlen;
+        if (rfu_host.clients[i].devid)
+          rfu_host_skip_stale(i);
+        dlen = MIN(16, rfu_host.clients[i].pkts[0].datalen);
+        if (rfu_host.clients[i].devid)
+          rfu_host.clients[i].recent = (rfu_host.clients[i].recent << 1) | (dlen != 0);
         if (rfu_host.clients[i].devid && dlen != 0) {
           RFU_DEBUG_LOG("Host reads data from client buffer (%d bytes)\n", dlen);
           // Accumulate into temp buffer
@@ -503,8 +612,8 @@ static s32 rfu_process_command() {
           rfu_buf[0] |= dlen << (8 + i * 5);
           // Discard front packet
           memmove(&rfu_host.clients[i].pkts[0], &rfu_host.clients[i].pkts[1],
-                  3 * sizeof(rfu_host.clients[i].pkts[0]));
-          rfu_host.clients[i].pkts[3].datalen = 0;
+                  (RFU_PKT_QUEUE_SIZE - 1) * sizeof(rfu_host.clients[i].pkts[0]));
+          rfu_host.clients[i].pkts[RFU_PKT_QUEUE_SIZE - 1].datalen = 0;
         }
       }
       // Copy data into words into the RFU buffer.
@@ -515,14 +624,17 @@ static s32 rfu_process_command() {
     else if (rfu_state == RFU_STATE_CLIENT) {
       u32 cnt = 0;
       u32 dlen = rfu_client.pkts[0].hblen;
+      if (dlen)
+        rfu_client.frame_reads++;
       RFU_DEBUG_LOG("Client reads data from host buffer (%d bytes)\n", dlen);
       rfu_buf[cnt++] = dlen;   // Header contains byte count.
       for (j = 0; j < (dlen + 3) / 4; j++)
         rfu_buf[cnt++] = leupack32(&rfu_client.pkts[0].hdata[j*4]);
 
       // Move to the next packet
-      memmove(&rfu_client.pkts[0], &rfu_client.pkts[1], sizeof(rfu_client.pkts[0]) * 3);
-      rfu_client.pkts[3].hblen = 0;
+      memmove(&rfu_client.pkts[0], &rfu_client.pkts[1],
+              sizeof(rfu_client.pkts[0]) * (RFU_PKT_QUEUE_SIZE - 1));
+      rfu_client.pkts[RFU_PKT_QUEUE_SIZE - 1].hblen = 0;
       return cnt;
     }
     break;
@@ -557,18 +669,48 @@ static s32 rfu_process_command() {
   return 0;
 }
 
+// A client that answers steadily and has not answered this time yet.
+static bool rfu_host_client_late(u32 c) {
+  u32 bits = rfu_host.clients[c].recent, n = 0;
+  if (!rfu_host.clients[c].devid || rfu_host.clients[c].pkts[0].datalen)
+    return false;
+  for (; bits; bits &= bits - 1)
+    n++;
+  return n >= RFU_HOST_STEADY_MIN;
+}
+
+// True while the host waits for the late answer of a steady client.
+static bool rfu_host_late() {
+  u32 i;
+  if (!rfu_late_cycles)
+    return false;
+  for (i = 0; i < 4; i++)
+    if (rfu_host_client_late(i) && rfu_host.clients[i].slack >= RFU_HOST_SLACK)
+      return true;
+  return false;
+}
+
 // Returns true if a Wait event can finish due to new data being available.
 static bool rfu_data_avail() {
   if (rfu_state == RFU_STATE_CLIENT) {
-    if (rfu_client.pkts[0].hblen != 0)
+    u32 n = 0;
+    if (!rfu_client.pkts[0].hblen)
+      return false;
+    if (!rfu_client.frame_reads)
       return true;
+    while (n < RFU_PKT_QUEUE_SIZE && rfu_client.pkts[n].hblen)
+      n++;
+    return rfu_client.frame_reads < 2 && n > RFU_CLIENT_BACKLOG;
   }
   else if (rfu_state == RFU_STATE_HOST) {
-    // Returns true if any data from any client is available.
+    // Returns true if any data from any client is available (and no steady
+    // client is still to answer, while the host may wait for it).
     u32 i;
+    bool any = false;
     for (i = 0; i < 4; i++)
       if (rfu_host.clients[i].devid && rfu_host.clients[i].pkts[0].datalen)
-        return true;
+        any = true;
+    return any && !rfu_host_late();
   }
   return false;
 }
@@ -644,8 +786,10 @@ u32 rfu_transfer(u32 sent_value) {
     // and reverse the clock roles (the RFU becomes master).
     if (rfu_cmd == RFU_CMD_WAIT || rfu_cmd == RFU_CMD_RTX_WAIT || rfu_cmd == RFU_CMD_SEND_DATAW) {
       rfu_comstate = RFU_COMSTATE_WAITEVENT;
+      rfu_poll_cycles = RFU_POLL_CYCLES;   // Have a look right away
       rfu_timeout_cycles = rfu_timeout * (16777216 / 60);  // Frames to cycles
       rfu_resp_timeout = rfu_rtx_max * (16777216 / 60 / 6);  // RFU "frame" to cycles
+      rfu_late_cycles = RFU_HOST_WAIT_FRAMES * (16777216 / 60);
     } else {
       rfu_comstate = rfu_plen ? RFU_COMSTATE_RESPDAT : RFU_COMSTATE_WAITCMD;
     }
@@ -681,6 +825,7 @@ u32 rfu_transfer(u32 sent_value) {
 
 // Gets called every frame for basic device updates.
 void rfu_frame_update() {
+  rfu_client.frame_reads = 0;
   // If device is in reset state, do nothing really.
   if (rfu_comstate != RFU_COMSTATE_RESET) {
     u32 i;
@@ -715,6 +860,30 @@ void rfu_frame_update() {
   }
 }
 
+// The network told us a peer is gone (or, with client_id < 0, that the whole
+// session is over). Without this a client whose host left stayed connected
+// forever, and a host kept a dead client for the 4s TTL. A client that is
+// no longer connected answers the game's next Wait with a disconnect event.
+void rfu_net_disconnect(int client_id) {
+  u32 i;
+  if (rfu_state == RFU_STATE_CLIENT) {
+    if (client_id < 0 || client_id == rfu_client.host_id) {
+      RFU_DEBUG_LOG("Host is gone, disconnecting\n");
+      memset(&rfu_client, 0, sizeof(rfu_client));
+      rfu_state = RFU_STATE_IDLE;
+    }
+  }
+  else if (rfu_state == RFU_STATE_HOST) {
+    for (i = 0; i < 4; i++) {
+      if (rfu_host.clients[i].devid &&
+          (client_id < 0 || rfu_host.clients[i].client_id == client_id)) {
+        RFU_DEBUG_LOG("Client slot %d is gone, disconnecting\n", i);
+        memset(&rfu_host.clients[i], 0, sizeof(rfu_host.clients[i]));
+      }
+    }
+  }
+}
+
 void rfu_net_receive(const void* buf, size_t len, uint16_t client_id) {
   // RFU1 header, just some minor sanity check really.
   if (len >= 12 && upack32((const u8*)buf) == NET_RFU_HEADER) {
@@ -728,7 +897,7 @@ void rfu_net_receive(const void* buf, size_t len, uint16_t client_id) {
     case NET_RFU_BROADCAST:
       // Fill the broadcast slot for the peer
       RFU_DEBUG_LOG("Got broadcast (client: #%d devID: %02x)\n", client_id, hdata);
-      if (client_id < MAX_RFU_PEERS) {
+      if (client_id < MAX_RFU_PEERS && len >= 12 + 6 * 4) {
         rfu_peer_bcst[client_id].device_id = hdata;
         rfu_peer_bcst[client_id].valid = 1;
         rfu_peer_bcst[client_id].ttl = 0xff;
@@ -816,7 +985,7 @@ void rfu_net_receive(const void* buf, size_t len, uint16_t client_id) {
           rfu_net_send_cmd(client_id, NET_RFU_CLIENT_ACK,
                            rfu_client.devid | (rfu_client.clnum << 16));
           // Receive data from the host. Queue que packet if possible
-          for (i = 0; i < 4; i++) {
+          for (i = 0; i < RFU_PKT_QUEUE_SIZE; i++) {
             if (!rfu_client.pkts[i].hblen) {
               memcpy(&rfu_client.pkts[i].hdata, payl, blen);
               rfu_client.pkts[i].hblen = blen;
@@ -837,10 +1006,13 @@ void rfu_net_receive(const void* buf, size_t len, uint16_t client_id) {
         u32 clid = (hdata >> 16) & 0x3;
         u32 blen = hdata >> 24;
 
-        // Validate the slot with device ID
-        if (rfu_host.clients[clid].devid == cdevid) {
+        // Validate the slot with device ID (and the size: the packet says
+        // it, and a client never sends more than 16 bytes)
+        if (rfu_host.clients[clid].devid == cdevid &&
+            blen <= sizeof(rfu_host.clients[clid].pkts[0].data) &&
+            len >= blen + 12) {
           rfu_host.clients[clid].clttl = 0;   // Account for packet reception
-          for (i = 0; i < 4; i++) {
+          for (i = 0; i < RFU_PKT_QUEUE_SIZE; i++) {
             if (!rfu_host.clients[clid].pkts[i].datalen) {
               memcpy(rfu_host.clients[clid].pkts[i].data, payl, blen);
               rfu_host.clients[clid].pkts[i].datalen = blen;
@@ -881,11 +1053,16 @@ bool rfu_update(unsigned cycles) {
      * rfu_peer_bcst[] and other rfu_* globals.  All reads below must
      * re-fetch these globals after this point - do NOT cache rfu_state
      * etc. into a local across this call. */
-    netpacket_poll_receive();
+    rfu_poll_cycles += cycles;
+    if (rfu_poll_cycles >= RFU_POLL_CYCLES) {
+      rfu_poll_cycles = 0;
+      netpacket_poll_receive();
+    }
 
     // Check if we are running our of time to respond.
     rfu_timeout_cycles -= MIN(cycles, rfu_timeout_cycles);
     rfu_resp_timeout   -= MIN(cycles, rfu_resp_timeout);
+    rfu_late_cycles    -= MIN(cycles, rfu_late_cycles);
 
     // Wait for GBA to go into slave mode before finishing the wait!
     if ((read_ioreg(REG_SIOCNT) & 0x1) == 0) {
@@ -907,7 +1084,7 @@ bool rfu_update(unsigned cycles) {
         rfu_plen = 2;
         rfu_comstate = RFU_COMSTATE_WAITRESP;
       }
-      else if (rfu_state == RFU_STATE_HOST && !rfu_resp_timeout) {
+      else if (rfu_state == RFU_STATE_HOST && !rfu_resp_timeout && !rfu_host_late()) {
         // We "retransmitted" the message N times (not really, but the equivalent
         // time has elapsed) and we simulate a lack of client response.
         rfu_buf[0] = 0x99660000 | RFU_CMD_RESP_DATA | (1 << 8);
@@ -915,6 +1092,13 @@ bool rfu_update(unsigned cycles) {
         rfu_buf[2] = 0x80000000;
         rfu_cnt = 0;
         rfu_plen = 3;
+        // The late answers of steady clients will queue up (RFU_HOST_SLACK).
+        {
+          u32 i;
+          for (i = 0; i < 4; i++)
+            if (rfu_host_client_late(i) && rfu_host.clients[i].slack < 255)
+              rfu_host.clients[i].slack++;
+        }
         rfu_comstate = RFU_COMSTATE_WAITRESP;
       }
       else if (!rfu_timeout_cycles) {

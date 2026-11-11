@@ -34,10 +34,17 @@
 #endif
 
 #define MAX_QPACK             128    // 1 packet per frame (~2 second buffer, maybe too big)
-#define MAX_FPACK             512    // ~2 words per frame (can accumulate up to 256 words per frame)
+// Words queued per peer. A single packet can carry up to 255 words and TCP
+// can deliver a few of them at once: with only 512 the extra ones were
+// dropped, and both games were out of sync from then on.
+#define MAX_FPACK            4096
 
 
 void netpacket_send(uint16_t client_id, const void *buf, size_t len);
+
+// The peers are kept in arrays of 4 (the cable has 4 ends): a frontend
+// client id past that (ie. with a spectator connected) has no slot.
+#define PEER_OK(id)   ((id) <= 3)
 
 static void pack16(u32 *buf, const u16 *data, size_t wcnt) {
   u32 i;
@@ -72,6 +79,7 @@ static union {
     u16 checksum;
     u8 offset;                   // Current frame offset
     u8 hscnt;                    // Number of handshake tokens sent
+    u8 kacnt;                    // Frames since the last keepalive
     unsigned frcnt;              // Frame counter for events.
   } poke;
 
@@ -111,6 +119,7 @@ static union {
 #define SLAVE_IRQ_CYCLES_C   28672   // Aproximately every 1.7ms, ~9.5 per frame.
 #define SLAVE_IRQ_CYCLES_H  280064   // Aproximately every frame (16.66ms).
 #define MAX_FRAME_TIMEOUT      240   // After four seconds consider the peer gone.
+#define KEEPALIVE_FRAMES        60   // Tell our state at least once a second.
 
 // Pokemon protocol constants
 #define MASTER_HANDSHAKE    0x8FFF
@@ -236,6 +245,18 @@ void serialpoke_master_send(void) {
 
 void serialpoke_frame_update(void) {
   u32 i;
+
+  if (!PEER_OK(netplay_client_id))
+    return;
+
+  // Packets only go out while the game is using the link: a game that stops
+  // for a while (ie. saving after a trade) would read as gone on the other
+  // consoles after MAX_FRAME_TIMEOUT. Keep reminding them of our state.
+  if (++serstate.poke.kacnt >= KEEPALIVE_FRAMES) {
+    serstate.poke.kacnt = 0;
+    serialpoke_senddata(serstate.poke.peer[netplay_client_id].state, NULL);
+  }
+
   for (i = 0; i <= 3; i++) {
     if (i != netplay_client_id)
       if (serstate.poke.peer[i].timeout++ >= MAX_FRAME_TIMEOUT)
@@ -245,6 +266,8 @@ void serialpoke_frame_update(void) {
 
 bool serialpoke_update(unsigned cycles) {
   u32 i;
+  if (!PEER_OK(netplay_client_id))
+    return false;
   serstate.poke.frcnt += cycles;
 
   // During handshake we tipically receive one serial transaction per frame.
@@ -372,6 +395,8 @@ bool serialpoke_update(unsigned cycles) {
 void serialpoke_net_receive(const void* buf, size_t len, uint16_t client_id) {
   // MPK1 header, sanity checking.
   const u32 *pkt = (u32*)buf;
+  if (!PEER_OK(client_id))
+    return;
   if (len == 24 && netorder32(pkt[0]) == NET_SERPOKE_HEADER) {
     const unsigned count = serstate.poke.peer[client_id].count;
     const u32 flags = netorder32(pkt[1]);
@@ -416,7 +441,12 @@ void serialpoke_net_receive(const void* buf, size_t len, uint16_t client_id) {
 #define PACK_TAIL_SZ   (serial_mode == SERIAL_MODE_SERIAL_AW1 ? 1 : 2)
 
 static void serialaw_senddata(u16 cmd, u8 state, const u16 *packet, size_t wcnt) {
-  u32 flags = (cmd << 16) | (state << 8) | wcnt;
+  u32 flags;
+  // The header has 8 bits for the word count (and the other end checks the
+  // length against it): a longer packet could not be read anyway.
+  if (wcnt > 255)
+    wcnt = 255;
+  flags = (cmd << 16) | (state << 8) | wcnt;
   u32 pkt[2 + 128] = {
     netorder32(NET_SERADWR_HEADER),  // Header magic
     netorder32(flags),               // Current device state
@@ -509,7 +539,7 @@ void serialaw_master_send(void) {
     if (mvalue >= 0x8000 && mvalue <= 0x9F00) {
       for (i = 1; i <= 3; i++)
         write_ioreg(REG_SIOMULTI0 + i, process_awpeer_val(i) ?: (mvalue & 0xFC00));
-      if (mvalue & 0x3FF)
+      if ((mvalue & 0x3FF) && serstate.aw.peer[0].count < 255)
         serstate.aw.peer[0].data[serstate.aw.peer[0].count++] = mvalue;
       else {
         serialaw_senddata(serstate.aw.lastcmd, STATE_INTERSYNC, serstate.aw.peer[0].data, serstate.aw.peer[0].count);
@@ -569,6 +599,8 @@ void serialaw_master_send(void) {
 
 bool serialaw_update(unsigned cycles) {
   u32 i;
+  if (!PEER_OK(netplay_client_id))
+    return false;
   serstate.aw.frcnt += cycles;
 
   // During sync it's one per frame, otherwise ~2 per frame.
@@ -608,7 +640,7 @@ bool serialaw_update(unsigned cycles) {
         for (i = 0; i <= 3; i++)
           if (i != netplay_client_id)
             write_ioreg(REG_SIOMULTI0 + i, process_awpeer_val(i) ?: (mdata & 0xFC00));
-        if (mdata & 0x3FF)
+        if ((mdata & 0x3FF) && serstate.aw.peer[netplay_client_id].count < 255)
           serstate.aw.peer[netplay_client_id].data[serstate.aw.peer[netplay_client_id].count++] = mdata;
         else {
           serialaw_senddata(serstate.aw.lastcmd, STATE_INTERSYNC,
@@ -679,6 +711,8 @@ bool serialaw_update(unsigned cycles) {
 void serialaw_net_receive(const void* buf, size_t len, uint16_t client_id) {
   // MAW1 header, sanity checking.
   const u32 *pkt = (u32*)buf;
+  if (!PEER_OK(client_id))
+    return;
   if (len >= 8 && netorder32(pkt[0]) == NET_SERADWR_HEADER) {
     const u32 flags = netorder32(pkt[1]);
     const u16 cmd = flags >> 16;

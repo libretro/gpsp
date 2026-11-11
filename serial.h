@@ -24,6 +24,8 @@
 #define SERIAL_MODE_SERIAL_AW1    4  // Connected to serial cable (AdvWars emulation mode)
 #define SERIAL_MODE_SERIAL_AW2    5  // Connected to serial cable (AdvWars emulation mode)
 #define SERIAL_MODE_AUTO          6  // Choose best fit automatically
+#define SERIAL_MODE_SERIAL_CABLE  7  // Connected to serial cable (real time, protocol agnostic)
+#define SERIAL_MODE_DUAL_CABLE    8  // Cable to the second GBA of this core (Dual Cable Link)
 
 extern int serial_mode;
 
@@ -45,6 +47,7 @@ bool rfu_update(unsigned cycles);
 u32 rfu_transfer(u32 value);
 void rfu_frame_update(void);
 void rfu_net_receive(const void* buf, size_t len, uint16_t client_id);
+void rfu_net_disconnect(int client_id);
 
 // Serial implementations
 void serialproto_reset(void);
@@ -58,6 +61,27 @@ void serialaw_frame_update(void);
 void serialaw_master_send(void);
 bool serialaw_update(unsigned cycles);
 void serialaw_net_receive(const void* buf, size_t len, uint16_t client_id);
+
+// Real time link cable
+void serialcable_reset(void);
+void serialcable_session_reset(void);
+void serialcable_replug(void);
+void serialcable_peer_connected(uint16_t client_id);
+void serialcable_peer_disconnected(uint16_t client_id);
+void serialcable_mode_changed(void);
+u16 serialcable_mul_siocnt(void);
+u16 serialcable_normal_write(u16 oldval, u16 newval);
+u16 serialcable_multi_write(u16 oldval, u16 newval);
+void serialcable_send_written(u16 oldval, u16 newval);
+void serialcable_frame_start(void);
+bool serialcable_frame_end(void);
+u32 serialcable_next_event(void);
+bool serialcable_update(unsigned cycles);
+void serialcable_net_receive(const void* buf, size_t len, uint16_t client_id);
+
+// Dual Cable Link (serial_dual.c, dual.c)
+cpu_alert_type dualport_write_siocnt(u16 value);
+cpu_alert_type dualport_write_rcnt(u16 value);
 
 // GBP interface
 u32 gbp_transfer(u32 value);

@@ -32,6 +32,11 @@ Many new features (compared to the original release) are:
  - Slightly better performance (for some games at least!)
  - Better audio (fixed many audio related bugs).
  - Ships an opensource BIOS replacement,we recommend using the original though.
+ - Runs the Nintendo Switch Online builds of Pokemon FireRed/LeafGreen
+   (header revision 10, extracted from the Switch release): their calls to
+   the Switch emulator are patched in memory when the ROM loads, so they
+   boot, keep the names you type and save to the normal flash save. The
+   wireless/online features of those calls are not available.
 
 Planned features (aka the TODO list)
 ====================================

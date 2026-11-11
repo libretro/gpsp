@@ -185,6 +185,11 @@ void process_cheats(void)
 {
    u32 i;
 
+   // Dual Cable Link: the copy of this GBA on the other console has no
+   // cheats, both must stay the same machine.
+   if (serial_mode == SERIAL_MODE_DUAL_CABLE)
+      return;
+
    for(i = 0; i <= max_cheat; i++)
    {
       if(!cheats[i].cheat_active)

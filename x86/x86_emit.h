@@ -1819,7 +1819,8 @@ u32 execute_store_cpsr_body()
 
 #define generate_shift_load_operands_reg()                                    \
   generate_load_reg(a0, rd);                                                  \
-  generate_load_reg(a1, rs)                                                   \
+  generate_load_reg(a1, rs);                                                  \
+  generate_and_imm(a1, 0xFF)  /* (only the bottom byte counts) */             \
 
 #define generate_shift_load_operands_imm()                                    \
   generate_load_reg(a0, rs);                                                  \
@@ -2280,15 +2281,29 @@ static void function_cc execute_swi(u32 pc)
    block_exits[block_exit_position].branch_target);                           \
   block_exit_position++                                                       \
 
+/* Div and DivArm cost as on the ARM32 dynarec (11 + 32 and 14 + 32 cycles
+ * on top of the 64 the translator adds): a GBA copied to another console by
+ * the Dual Cable Link must keep the very same timing on every backend. */
 #define arm_hle_div(cpu_mode)                                                 \
 {                                                                             \
-  u8 *jmpinst;                                                                \
+  u8 *jmpinst, *jmpneg, *jmpdone;                                             \
+  cycle_count += 11 + 32;                                                     \
   generate_load_reg(a0, 0);                                                   \
   generate_load_reg(a2, 1);                                                   \
   generate_cmp_imm(a2, 0);                                                    \
   x86_emit_j_filler(x86_condition_code_z, jmpinst);                           \
+  /* By -1: the quotient is just -n (idiv faults on 0x80000000 / -1) */     \
+  generate_cmp_imm(a2, 0xFFFFFFFF);                                           \
+  x86_emit_j_filler(x86_condition_code_nz, jmpneg);                           \
+  generate_load_imm(a1, 0);                                                   \
+  generate_sub(a1, a0);                                                       \
+  generate_mov(a0, a1);                                                       \
+  generate_load_imm(a1, 0);                                                   \
+  x86_emit_jmp_filler(jmpdone);                                               \
+  generate_branch_patch_conditional(jmpneg, translation_ptr);                 \
   x86_emit_cdq();                                                             \
   x86_emit_idiv_eax_reg(ecx);                                                 \
+  generate_branch_patch_unconditional(jmpdone, translation_ptr);              \
   generate_store_reg(a0, 0);                                                  \
   generate_store_reg(a1, 1);                                                  \
   generate_mov(a1, a0);                                                       \
@@ -2301,13 +2316,24 @@ static void function_cc execute_swi(u32 pc)
 
 #define arm_hle_div_arm(cpu_mode)                                             \
 {                                                                             \
-  u8 *jmpinst;                                                                \
+  u8 *jmpinst, *jmpneg, *jmpdone;                                             \
+  cycle_count += 14 + 32;                                                     \
   generate_load_reg(a0, 1);                                                   \
   generate_load_reg(a2, 0);                                                   \
   generate_cmp_imm(a2, 0);                                                    \
   x86_emit_j_filler(x86_condition_code_z, jmpinst);                           \
+  /* By -1: the quotient is just -n (idiv faults on 0x80000000 / -1) */     \
+  generate_cmp_imm(a2, 0xFFFFFFFF);                                           \
+  x86_emit_j_filler(x86_condition_code_nz, jmpneg);                           \
+  generate_load_imm(a1, 0);                                                   \
+  generate_sub(a1, a0);                                                       \
+  generate_mov(a0, a1);                                                       \
+  generate_load_imm(a1, 0);                                                   \
+  x86_emit_jmp_filler(jmpdone);                                               \
+  generate_branch_patch_conditional(jmpneg, translation_ptr);                 \
   x86_emit_cdq();                                                             \
   x86_emit_idiv_eax_reg(ecx);                                                 \
+  generate_branch_patch_unconditional(jmpdone, translation_ptr);              \
   generate_store_reg(a0, 0);                                                  \
   generate_store_reg(a1, 1);                                                  \
   generate_mov(a1, a0);                                                       \

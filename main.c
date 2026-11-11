@@ -142,6 +142,10 @@ u32 function_cc update_gba(int remaining_cycles)
     unsigned completed_cycles = execute_cycles - remaining_cycles;
     cpu_ticks += completed_cycles;
 
+    // Dual Cable Link: time moves on, wait for the other GBA if need be.
+    if (serial_mode == SERIAL_MODE_DUAL_CABLE)
+      dualport_sync(completed_cycles);
+
     remaining_cycles = 0;
 
     // Timers can trigger DMA (usually sound) and consume cycles
@@ -242,6 +246,9 @@ u32 function_cc update_gba(int remaining_cycles)
           // We completed a frame, tell the dynarec to exit to the main thread
           frame_complete = 0x80000000;
           frame_counter++;
+
+          if (serial_mode == SERIAL_MODE_DUAL_CABLE)
+            dualport_frame_end();
         }
 
         // Vcount trigger (flag) and IRQ if enabled
@@ -309,6 +316,7 @@ u32 function_cc update_gba(int remaining_cycles)
 void reset_gba(void)
 {
   gbp_reset();
+  serialcable_reset();
   init_memory();
   init_main();
   init_cpu();
@@ -390,6 +398,10 @@ bool main_read_savestate(const u8 *src)
     else
       serial_set_irq_cycles(0);   /* Older states: no pending IRQ. */
   }
+
+  /* The other consoles did not travel back in time with us: whatever
+   * transfer was going on is lost, the cable stays plugged. */
+  serialcable_reset();
 
   /* random_state is also optional for backwards compat. Missing means
    * 'use whatever is currently in the static'; the RFU path will reseed

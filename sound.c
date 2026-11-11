@@ -36,7 +36,10 @@ u32 sound_on;
 static s32 sound_buffer[BUFFER_SIZE];
 static u32 sound_buffer_base;
 
-static fixed16_16 gbc_sound_tick_step;
+/* The PSG frame sequencer (length, envelope, sweep) runs at 256 Hz: each
+ * output sample moves it 256 / sound_frequency of a tick, in 16.16. It
+ * follows the output rate (at 32768 Hz a fixed 256 ran it at half speed). */
+#define gbc_sound_tick_step ((fixed16_16)(1u << (24 - sound_freq_bits)))
 
 /* Queue 4 samples to the top of the DS FIFO, wrap around circularly */
 
@@ -82,6 +85,12 @@ unsigned sound_timer(fixed8_24 frequency_step, u32 channel)
 
     sample_status = ds->status;
   }
+
+#ifdef GPSP_INSTANCE_B
+  // Dual Cable Link: nobody hears this GBA. Its samples are not made; the
+  // FIFO and its DMA, which the game sees, go on as always.
+  sample_status = DIRECT_SOUND_INACTIVE;
+#endif
 
   // Unqueue 1 sample from the base of the DS FIFO and place it on the audio
   // buffer for as many samples as necessary. If the DS FIFO is 16 bytes or
@@ -330,6 +339,17 @@ u32 gbc_sound_master_volume;
  * keep 4 of them by accumulating at 16-bit scale, rounding to nearest.
  * Overflow-safe in s32: the product spans [-2^31, 7 * 2^28] and adding the
  * half-LSB 2^17 cannot exceed INT32_MAX nor underflow INT32_MIN. */
+#ifdef GPSP_INSTANCE_B
+/* Dual Cable Link: nobody hears this GBA. Only the samples are left out:
+ * the length, envelope and sweep counters (the status bits the game reads)
+ * go on as always. */
+#define gbc_sound_render_sample_right()                                       \
+  (void)current_sample                                                        \
+
+#define gbc_sound_render_sample_left()                                        \
+  (void)current_sample                                                        \
+
+#else
 #define gbc_sound_render_sample_right()                                       \
   sound_buffer[buffer_index + 1] +=                                           \
    (current_sample * volume_right + (1 << 17)) >> 18                          \
@@ -337,6 +357,8 @@ u32 gbc_sound_master_volume;
 #define gbc_sound_render_sample_left()                                        \
   sound_buffer[buffer_index] +=                                               \
    (current_sample * volume_left + (1 << 17)) >> 18                           \
+
+#endif
 
 #define gbc_sound_render_sample_both()                                        \
   gbc_sound_render_sample_right();                                            \
@@ -369,7 +391,10 @@ u32 gbc_sound_master_volume;
    ((s32)(noise_table7[fp16_16_to_u32(sample_index) >> 5] <<                  \
    (fp16_16_to_u32(sample_index) & 0x1F)) >> 31) ^ 0x07                       \
 
+/* The index stays inside the table: it may come from the other (longer)
+ * noise mode, or step past more than a whole table at high frequencies. */
 #define gbc_sound_render_noise(type, noise_type, envelope_op, sweep_op)       \
+  sample_index %= u32_to_fp16_16(gbc_noise_wrap_##noise_type);                \
   for(i = 0; i < buffer_ticks; i++)                                           \
   {                                                                           \
     get_noise_sample_##noise_type();                                          \
@@ -377,7 +402,7 @@ u32 gbc_sound_master_volume;
                                                                               \
     sample_index += frequency_step;                                           \
                                                                               \
-    if(sample_index >= u32_to_fp16_16(gbc_noise_wrap_##noise_type))           \
+    while(sample_index >= u32_to_fp16_16(gbc_noise_wrap_##noise_type))        \
       sample_index -= u32_to_fp16_16(gbc_noise_wrap_##noise_type);            \
                                                                               \
     buffer_index = (buffer_index + 2) % BUFFER_SIZE;                          \
@@ -600,9 +625,6 @@ void reset_sound(void)
 
 void init_sound()
 {
-  /* 256 / sound_frequency in 16.16 == 256 (sound_frequency == 2^16). */
-  gbc_sound_tick_step = (fixed16_16)256u;
-
   init_noise_table(noise_table15, 32767, 14);
   init_noise_table(noise_table7, 127, 6);
 
@@ -627,7 +649,7 @@ bool sound_check_savestate(const u8 *src)
     "len-status", "len-ticks", "noise-type", "sample-tbl"
   };
 
-  int i;
+  int i, j;
   const u8 *snddoc = bson_find_key(src, "sound");
   if (!snddoc)
     return false;
@@ -646,8 +668,9 @@ bool sound_check_savestate(const u8 *src)
     if (!sndchan)
       return false;
 
-    for (i = 0; i < sizeof(dsvars)/sizeof(dsvars[0]); i++)
-      if (!bson_contains_key(sndchan, dsvars[i], BSON_TYPE_INT32))
+    /* (j: i is the channel, every one of them is checked) */
+    for (j = 0; j < sizeof(dsvars)/sizeof(dsvars[0]); j++)
+      if (!bson_contains_key(sndchan, dsvars[j], BSON_TYPE_INT32))
         return false;
 
     if (!bson_contains_key(sndchan, "fifo-bytes", BSON_TYPE_BIN))
@@ -661,8 +684,8 @@ bool sound_check_savestate(const u8 *src)
     if (!sndchan)
       return false;
 
-    for (i = 0; i < sizeof(gsvars)/sizeof(gsvars[0]); i++)
-      if (!bson_contains_key(sndchan, gsvars[i], BSON_TYPE_INT32))
+    for (j = 0; j < sizeof(gsvars)/sizeof(gsvars[0]); j++)
+      if (!bson_contains_key(sndchan, gsvars[j], BSON_TYPE_INT32))
         return false;
   }
 

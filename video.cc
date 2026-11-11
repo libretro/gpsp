@@ -899,6 +899,8 @@ static inline void render_scanline_bitmap(
     }
 
     u32 pixel_x = (u32)(source_x >> 8);
+    if (pixel_x >= width)
+      return;   // Past the right edge: nothing to draw (width - pixel_x would wrap)
     u32 pixcnt = MIN(end - start, width - pixel_x);
     pixfmt *valptr = &src_ptr[pixel_x + (pixel_y * width)];
     pixfmt val = 0;
@@ -1487,7 +1489,7 @@ void render_scanline_objs(
     bool is_trans = ((obj_attr0 >> 10) & 0x3) == OBJ_MOD_SEMITRAN;
 
     t_sprite obji = {
-      .obj_x = (s32)(obj_attr1 << 23) >> 23,
+      .obj_x = (s32)((u32)obj_attr1 << 23) >> 23,
       .obj_y = obj_attr0 & 0xFF,
       .obj_w = obj_dim_table[obj_shape][obj_size][0],
       .obj_h = obj_dim_table[obj_shape][obj_size][1],
@@ -1613,7 +1615,7 @@ static void order_obj(u32 video_mode)
 
     if(((obj_y + obj_height) > 0) && (obj_y < 160))
     {
-      s32 obj_x = (s32)(obj_attr1 << 23) >> 23;
+      s32 obj_x = (s32)((u32)obj_attr1 << 23) >> 23;
 
       if(((obj_x + obj_width) > 0) && (obj_x < 240))
       {

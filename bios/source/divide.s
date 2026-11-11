@@ -50,9 +50,11 @@ swi_Div:
 
 	// This moves out the current bit to the MSB of the denominator,
 	// and aligns the denominator up to the same bit-length as the
-	// numerator
+	// numerator. It is compared with half the numerator, so that it never
+	// gets past 0x80000000 (with a numerator of 0x80000000 it would shift
+	// out to zero, and this loop would never end).
  0:
-	cmp denominator, numerator
+	cmp denominator, numerator, lsr #1
 	movls denominator, denominator, lsl #1
 	movls current_bit, current_bit, lsl #1
 	bls 0b

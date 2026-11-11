@@ -18,6 +18,8 @@ SOURCES_C := $(CORE_DIR)/main.c \
              $(CORE_DIR)/gbp.c \
              $(CORE_DIR)/rfu.c \
              $(CORE_DIR)/serial_proto.c \
+             $(CORE_DIR)/serial_dual.c \
+             $(CORE_DIR)/serial_cable.c \
              $(CORE_DIR)/libretro/libretro.c \
              $(CORE_DIR)/gba_cc_lut.c \
              $(LIBRETRO_COMM_DIR)/compat/compat_posix_string.c \

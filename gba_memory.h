@@ -180,7 +180,7 @@ typedef enum
   REG_SIOMULTI3 = 0x93,
   REG_SIOCNT = 0x94,
   REG_SIOMLT_SEND = 0x95,
-  REG_SIODATA8 = 0x96,
+  REG_SIODATA8 = 0x95,
   // Key input
   REG_P1 = 0x098,
   REG_P1CNT = 0x099,
@@ -330,6 +330,8 @@ s32 load_bios(char *name);
 void init_memory(void);
 void init_gamepak_buffer(void);
 void rtc_set_time_source(rtc_time_source_type source);
+void rtc_dual_begin(bool owner);
+void rtc_dual_end(void);
 bool gamepak_must_swap(void);
 void memory_term(void);
 u8 *load_gamepak_page(u32 physical_index);

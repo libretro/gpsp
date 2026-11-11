@@ -76,6 +76,7 @@ endif
 LIBM		   := -lm
 CORE_DIR    := .
 LDFLAGS     :=
+LIBPTHREAD  := -lpthread
 
 # Unix
 ifeq ($(platform), unix)
@@ -115,6 +116,7 @@ else ifeq ($(platform), osx)
 		fpic += -mmacosx-version-min=10.1
 	endif
 	SHARED := -dynamiclib
+	OBJCOPY ?= llvm-objcopy
 	ifeq ($(HAVE_DYNAREC),1)
 		MMAP_JIT_CACHE = 1
 	endif
@@ -134,6 +136,7 @@ else ifneq (,$(findstring ios,$(platform)))
 	TARGET := $(TARGET_NAME)_libretro_ios.dylib
 	fpic := -fPIC
 	SHARED := -dynamiclib
+	OBJCOPY ?= llvm-objcopy
 	CPU_ARCH := arm
 
 	ifeq ($(IOSSDK),)
@@ -163,6 +166,7 @@ else ifeq ($(platform), tvos-arm64)
 	TARGET := $(TARGET_NAME)_libretro_tvos.dylib
 	fpic := -fPIC
 	SHARED := -dynamiclib
+	OBJCOPY ?= llvm-objcopy
 	CPU_ARCH := arm
 	CFLAGS += -DIOS -DHAVE_POSIX_MEMALIGN
 
@@ -188,6 +192,8 @@ else ifeq ($(platform), theos_ios)
 	CFLAGS += -DIOS -DHAVE_POSIX_MEMALIGN -marm
 	CPU_ARCH := arm
 	LIBRARY_NAME = $(TARGET_NAME)_libretro_ios
+	# Theos builds its own file list, without the hidden GBAs: no Dual Cable Link.
+	HAVE_DUAL := 0
 
 # QNX
 else ifeq ($(platform), qnx)
@@ -200,6 +206,8 @@ else ifeq ($(platform), qnx)
 	CC = qcc -Vgcc_ntoarmv7le
 	CXX = qcc -Vgcc_ntoarmv7le
 	AR = qcc -Vgcc_ntoarmv7le
+	NM = ntoarmv7-nm
+	OBJCOPY = ntoarmv7-objcopy
 	CFLAGS += -D__BLACKBERRY_QNX_
 	HAVE_DYNAREC := 1
 
@@ -211,6 +219,8 @@ else ifeq ($(platform), psl1ght)
 	AR = $(PS3DEV)/ppu/bin/ppu-ar$(EXE_EXT)
 	CFLAGS += -DMSB_FIRST -D__ppc__
 	STATIC_LINKING = 1
+	# No pthreads: no Dual Cable Link (see HAVE_DUAL).
+	HAVE_DUAL := 0
 	
 # Nintendo Switch (libnx)
 else ifeq ($(platform), libnx)
@@ -232,6 +242,8 @@ else ifneq (,$(filter $(platform), ngc wii wiiu))
 	CFLAGS += -DGEKKO -mcpu=750 -meabi -mhard-float -DHAVE_STRTOF_L
         CFLAGS += -ffunction-sections -fdata-sections -D__wiiu__ -D__wut__
 	STATIC_LINKING = 1
+	# No pthreads: no Dual Cable Link (see HAVE_DUAL).
+	HAVE_DUAL := 0
 
 # PSP
 else ifeq ($(platform), psp1)
@@ -245,6 +257,8 @@ else ifeq ($(platform), psp1)
 	CFLAGS += -fomit-frame-pointer -ffast-math
 	CFLAGS += -falign-functions=32 -falign-loops -falign-labels -falign-jumps
 	STATIC_LINKING = 1
+	# A static JIT cache for every GBA does not fit: no Dual Cable Link.
+	HAVE_DUAL := 0
 	HAVE_DYNAREC = 1
 	CPU_ARCH := mips
 
@@ -262,6 +276,8 @@ else ifeq ($(platform), vita)
 	CFLAGS += -ftree-vectorize -fno-optimize-sibling-calls
 	ASFLAGS += -mcpu=cortex-a9
 	STATIC_LINKING = 1
+	# One JIT block from the frontend for every GBA: no Dual Cable Link.
+	HAVE_DUAL := 0
 	HAVE_DYNAREC = 1
 	OVERCLOCK_60FPS = 1
 	CPU_ARCH := arm
@@ -279,6 +295,8 @@ else ifeq ($(platform), ctr)
 	CPU_ARCH := arm
 	HAVE_DYNAREC = 1
 	STATIC_LINKING = 1
+	# The JIT cache is at a fixed address, the same for every GBA: no Dual Cable Link.
+	HAVE_DUAL := 0
 
 # Raspberry Pi 3
 else ifeq ($(platform), rpi3)
@@ -324,8 +342,9 @@ else ifeq ($(platform), classic_armv7_a7)
 	TARGET := $(TARGET_NAME)_libretro.so
 	fpic := -fPIC
     SHARED := -shared -Wl,--version-script=link.T  -Wl,--no-undefined -fPIC
+	# No LTO: the hidden GBAs (Dual Cable Link) are renamed in the object
+	# files, which must hold machine code.
 	CFLAGS += -Ofast \
-	-flto=4 -fwhole-program -fuse-linker-plugin \
 	-fdata-sections -ffunction-sections -Wl,--gc-sections \
 	-fno-stack-protector -fno-ident -fomit-frame-pointer \
 	-falign-functions=1 -falign-jumps=1 -falign-loops=1 \
@@ -357,6 +376,8 @@ else ifeq ($(platform), xenon)
 	AR = xenon-ar$(EXE_EXT)
 	CFLAGS += -D__LIBXENON__ -m32 -D__ppc__
 	STATIC_LINKING = 1
+	# No pthreads: no Dual Cable Link (see HAVE_DUAL).
+	HAVE_DUAL := 0
 
 # Nintendo Game Cube
 else ifeq ($(platform), ngc)
@@ -366,6 +387,8 @@ else ifeq ($(platform), ngc)
 	AR = $(DEVKITPPC)/bin/powerpc-eabi-ar$(EXE_EXT)
 	CFLAGS += -DGEKKO -DHW_DOL -mrvl -mcpu=750 -meabi -mhard-float -DMSB_FIRST -D__ppc__
 	STATIC_LINKING = 1
+	# No pthreads: no Dual Cable Link (see HAVE_DUAL).
+	HAVE_DUAL := 0
 
 # Nintendo Wii
 else ifeq ($(platform), wii)
@@ -375,6 +398,8 @@ else ifeq ($(platform), wii)
 	AR = $(DEVKITPPC)/bin/powerpc-eabi-ar$(EXE_EXT)
 	CFLAGS += -DGEKKO -DHW_RVL -mrvl -mcpu=750 -meabi -mhard-float -DMSB_FIRST -D__ppc__
 	STATIC_LINKING = 1
+	# No pthreads: no Dual Cable Link (see HAVE_DUAL).
+	HAVE_DUAL := 0
 
 # aarch64 (armv8)
 else ifeq ($(platform), arm64)
@@ -453,11 +478,15 @@ else ifeq ($(platform), ps2)
 	HAVE_DYNAREC = 1
 	CPU_ARCH := mips
 	STATIC_LINKING = 1
+	# A static JIT cache for every GBA does not fit: no Dual Cable Link.
+	HAVE_DUAL := 0
 
 # emscripten
 else ifeq ($(platform), emscripten)
 	TARGET := $(TARGET_NAME)_libretro_$(platform).bc
 	STATIC_LINKING = 1
+	# No threads or objcopy for bitcode: no Dual Cable Link (see HAVE_DUAL).
+	HAVE_DUAL := 0
 
 # GCW0 (OD and OD Beta)
 else ifeq ($(platform), gcw0)
@@ -518,8 +547,10 @@ else ifeq ($(platform), miyoomini)
 	AR = /opt/miyoomini-toolchain/usr/bin/arm-linux-ar
 	fpic := -fPIC
 	SHARED := -shared -Wl,--version-script=link.T -Wl,--no-undefined
+	NM = /opt/miyoomini-toolchain/usr/bin/arm-linux-nm
+	OBJCOPY = /opt/miyoomini-toolchain/usr/bin/arm-linux-objcopy
+	# No LTO: both GBAs (instances A and B) must be the very same machine code.
 	CFLAGS += -Ofast \
-	-flto=4 -fwhole-program -fuse-linker-plugin \
 	-fdata-sections -ffunction-sections -Wl,--gc-sections \
 	-fno-stack-protector -fno-ident -fomit-frame-pointer \
 	-falign-functions=1 -falign-jumps=1 -falign-loops=1 \
@@ -536,6 +567,43 @@ else ifeq ($(platform), miyoomini)
 	ARCH = arm
 	BUILTIN_GPU = neon
 
+# Android (NDK clang). One ABI per build:
+#   make platform=android ANDROID_ABI=arm64-v8a NDK=/path/to/ndk
+# ABIs: armeabi-v7a, arm64-v8a, x86, x86_64
+else ifeq ($(platform), android)
+	ANDROID_ABI ?= arm64-v8a
+	ANDROID_API ?= 21
+	NDK ?= $(ANDROID_NDK_HOME)
+	NDK_BIN := $(NDK)/toolchains/llvm/prebuilt/linux-x86_64/bin
+	TARGET := $(TARGET_NAME)_plus_libretro_android.so
+	fpic := -fPIC
+	# Bionic has pthreads inside libc; no libstdc++ needed.
+	SHARED := -shared -Wl,--version-script=link.T -Wl,--no-undefined -nostdlib++
+	LIBPTHREAD :=
+	AR = $(NDK_BIN)/llvm-ar
+	NM = $(NDK_BIN)/llvm-nm
+	OBJCOPY = $(NDK_BIN)/llvm-objcopy
+	HAVE_DYNAREC := 1
+	MMAP_JIT_CACHE = 1
+	ifeq ($(ANDROID_ABI), armeabi-v7a)
+		ANDROID_TRIPLE := armv7a-linux-androideabi
+		CPU_ARCH := arm
+		CFLAGS += -marm
+	else ifeq ($(ANDROID_ABI), arm64-v8a)
+		ANDROID_TRIPLE := aarch64-linux-android
+		CPU_ARCH := arm64
+	else ifeq ($(ANDROID_ABI), x86)
+		ANDROID_TRIPLE := i686-linux-android
+		CPU_ARCH := x86_32
+	else ifeq ($(ANDROID_ABI), x86_64)
+		ANDROID_TRIPLE := x86_64-linux-android
+		CPU_ARCH := x86_32
+	else
+		$(error Unknown ANDROID_ABI '$(ANDROID_ABI)')
+	endif
+	CC = $(NDK_BIN)/$(ANDROID_TRIPLE)$(ANDROID_API)-clang
+	CXX = $(NDK_BIN)/$(ANDROID_TRIPLE)$(ANDROID_API)-clang++
+
 # Windows
 else
 	TARGET := $(TARGET_NAME)_libretro.dll
@@ -543,6 +611,8 @@ else
 	CXX ?= g++
 	SHARED := -shared -static-libgcc -static-libstdc++ -s -Wl,--version-script=link.T
 	CFLAGS += -D__WIN32__ -D__WIN32_LIBRETRO__
+	# winpthreads linked in: no libwinpthread-1.dll needed
+	LIBPTHREAD := -Wl,-Bstatic -lpthread -Wl,-Bdynamic
 
 	# Windows32/64 has dynarec support
 	HAVE_DYNAREC := 1
@@ -579,7 +649,16 @@ else ifeq ($(CPU_ARCH), x86_32)
 	DEFINES += -DX86_ARCH
 endif
 
+# Dual Cable Link (every GBA of a link session on each console). Needs
+# pthreads, nm and objcopy; platforms that cannot have it set HAVE_DUAL := 0
+# above and get dual_stub.c (the Cable Link then uses the real time cable).
+HAVE_DUAL ?= 1
+
 include Makefile.common
+
+ifneq ($(HAVE_DUAL), 1)
+SOURCES_C += $(CORE_DIR)/dual_stub.c
+endif
 
 OBJECTS := $(SOURCES_C:.c=.o) $(SOURCES_ASM:.S=.o) $(SOURCES_CC:.cc=.o)
 
@@ -625,11 +704,66 @@ all: $(TARGET)
 
 # Linking with gcc on purpose, we do not use any libstdc++ dependencies at all, only libc is required.
 
-$(TARGET): $(OBJECTS)
-ifeq ($(STATIC_LINKING), 1)
-	$(AR) rcs $@ $(OBJECTS)
+ifeq ($(HAVE_DUAL), 1)
+# Dual Cable Link: the other GBAs (the hidden instances B, C and D) are the
+# whole core built again with -DGPSP_INSTANCE_B, linked into one object, and
+# copied three times with every global it defines renamed gbab_*, gbac_* and
+# gbad_*. What it uses but does not define (libc, the cable bus in dual.c)
+# stays shared.
+
+# nm and objcopy of the same toolchain as CC (a cross gcc: its own ones).
+DUAL_GCC := $(firstword $(filter %gcc$(EXE_EXT),$(CC)))
+ifneq ($(DUAL_GCC),)
+NM      ?= $(patsubst %gcc$(EXE_EXT),%nm$(EXE_EXT),$(DUAL_GCC))
+OBJCOPY ?= $(patsubst %gcc$(EXE_EXT),%objcopy$(EXE_EXT),$(DUAL_GCC))
+else ifneq ($(filter-out 1,$(CROSS_COMPILE)),)
+NM      ?= $(CROSS_COMPILE)nm
+OBJCOPY ?= $(CROSS_COMPILE)objcopy
+endif
+NM      ?= nm
+OBJCOPY ?= objcopy
+
+# C names carry a leading underscore in the object files on some targets
+# (Apple, 32 bit Windows): gbab_ goes after it.
+DUAL_SYM_PREFIX := $(word 3,$(shell echo | $(CC) $(CFLAGS) -dM -E - 2>/dev/null | grep __USER_LABEL_PREFIX__))
+
+DUAL_A_OBJECTS := $(OBJECTS) $(CORE_DIR)/dual.o
+DUAL_B_OBJECTS := $(patsubst $(CORE_DIR)/%,obj_b/%,$(OBJECTS))
+
+obj_b/%.o: $(CORE_DIR)/%.c
+	@mkdir -p $(dir $@)
+	$(CC) $(INCFLAGS) $(CFLAGS) $(OPTIMIZE) -DGPSP_INSTANCE_B -Wno-unused-variable -Wno-unused-label -c -o $@ $<
+
+obj_b/%.o: $(CORE_DIR)/%.cc
+	@mkdir -p $(dir $@)
+	$(CXX) $(INCFLAGS) $(CXXFLAGS) $(OPTIMIZE) -DGPSP_INSTANCE_B -c -o $@ $<
+
+obj_b/%.o: $(CORE_DIR)/%.S
+	@mkdir -p $(dir $@)
+	$(CC) $(ASFLAGS) $(CFLAGS) $(OPTIMIZE) -DGPSP_INSTANCE_B -c -o $@ $<
+
+DUAL_HIDDEN_OBJECTS := gpsp_b.o gpsp_c.o gpsp_d.o
+
+gpsp_hidden.o: $(DUAL_B_OBJECTS)
+	$(CC) -r -nostdlib -o $@ $(DUAL_B_OBJECTS)
+
+# gpsp_b.o: every global renamed gbab_*, and so on.
+$(DUAL_HIDDEN_OBJECTS): gpsp_hidden.o
+	$(NM) -g --defined-only $< | awk -v p='$(DUAL_SYM_PREFIX)' -v n='gba$(subst gpsp_,,$(basename $@))_' \
+		'NF == 3 && substr($$3, 1, length(p)) == p { print $$3 " " p n substr($$3, length(p) + 1) }' > $@.syms
+	$(OBJCOPY) --redefine-syms=$@.syms $< $@
+	rm -f $@.syms
 else
-	$(CC) $(fpic) $(SHARED) $(INCFLAGS) $(OPTIMIZE) -o $@ $(OBJECTS) $(LIBM) $(LDFLAGS)
+# No Dual Cable Link: dual_stub.c (in OBJECTS) instead of dual.c.
+DUAL_A_OBJECTS := $(OBJECTS)
+DUAL_HIDDEN_OBJECTS :=
+endif
+
+$(TARGET): $(DUAL_A_OBJECTS) $(DUAL_HIDDEN_OBJECTS)
+ifeq ($(STATIC_LINKING), 1)
+	$(AR) rcs $@ $(DUAL_A_OBJECTS) $(DUAL_HIDDEN_OBJECTS)
+else
+	$(CC) $(fpic) $(SHARED) $(INCFLAGS) $(OPTIMIZE) -o $@ $(DUAL_A_OBJECTS) $(DUAL_HIDDEN_OBJECTS) $(LIBM) $(LDFLAGS) $(LIBPTHREAD)
 endif
 
 cpu_threaded.o: cpu_threaded.c
@@ -648,7 +782,8 @@ clean-objs:
 	rm -rf $(OBJECTS)
 
 clean:
-	rm -f $(OBJECTS) $(TARGET)
+	rm -f $(OBJECTS) $(CORE_DIR)/dual.o $(TARGET) gpsp_hidden.o $(DUAL_HIDDEN_OBJECTS)
+	rm -rf obj_b
 
 .PHONY: clean
 endif

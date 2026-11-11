@@ -1329,10 +1329,15 @@ static void trace_instruction(u32 pc, u32 mode)
    math/logical tricks to avoid using USAT */
 
 #if __ARM_ARCH >= 6
+  /* An unaligned address rotates to a negative value, which USAT turns into
+     region 0 (BIOS): the ORR makes it -1 (slow path), as on ARMv5. (Otherwise
+     a misaligned load made by BIOS code, such as CpuSet given an odd source,
+     read the BIOS itself instead of rotating the word it points to.) */
   #define mem_calc_region(abits)                                              \
     if (abits) {                                                              \
-      ARM_MOV_REG_IMMSHIFT(0, reg_a2, reg_a0, ARMSHIFT_ROR, abits)            \
-      ARM_USAT_ASR(0, reg_a2, 4, reg_a2, 24-abits, ARMCOND_AL);               \
+      ARM_MOV_REG_IMMSHIFT(0, ARMREG_LR, reg_a0, ARMSHIFT_ROR, abits)         \
+      ARM_USAT_ASR(0, reg_a2, 4, ARMREG_LR, 24-abits, ARMCOND_AL);            \
+      ARM_ORR_REG_IMMSHIFT(0, reg_a2, reg_a2, ARMREG_LR, ARMSHIFT_ASR, 31);   \
     } else {                                                                  \
       ARM_USAT_ASR(0, reg_a2, 4, reg_a0, 24, ARMCOND_AL);                     \
     }

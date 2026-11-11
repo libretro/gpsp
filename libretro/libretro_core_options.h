@@ -126,7 +126,7 @@ struct retro_core_option_definition option_defs_us[] = {
    {
       "gpsp_serial",
       "Link Cable Connectivity",
-      "Configures the serial (Link Cable) connection. Automatic will pick up a reasonable support for most known games.",
+      "Configures the serial (Link Cable) connection. Automatic uses the Wireless Adapter, Pokemon or Advance Wars mode for the games that need them, and the Cable Link for every other game. The Cable Link resets the client's game when the netplay session starts, as games only look for the cable at boot.",
       {
          { "auto",     "Automatic" },
          { "disabled", "Disabled" },
@@ -134,6 +134,30 @@ struct retro_core_option_definition option_defs_us[] = {
          { "mul_poke", "Link Cable - Pokemon Gen3 mode" },
          { "mul_aw1",  "Link Cable - Advance Wars 1 mode" },
          { "mul_aw2",  "Link Cable - Advance Wars 2 mode" },
+         { "mul_cable", "Cable Link (real time)" },
+         { NULL, NULL },
+      },
+      "auto"
+   },
+   {
+      "gpsp_cable_players",
+      "Cable Link players",
+      "How many GBAs are on the Cable Link (the host's value counts, the clients take it). The host waits for all of them before the games restart, once. Each console runs every GBA, so 3 or 4 need more memory and CPU.",
+      {
+         { "2", NULL },
+         { "3", NULL },
+         { "4", NULL },
+         { NULL, NULL },
+      },
+      "2"
+   },
+   {
+      "gpsp_cable_different_games",
+      "Cable Link: different games",
+      "When the consoles have different games (another edition, region or dump). Automatic: each console looks for the other games in the folder of its own ROM and runs them too (dual cable: every screen at full speed, a slightly longer start); if a console does not have them, or has no memory for them, the real time cable is used. Real time cable: never look for the other games. The host's value counts.",
+      {
+         { "auto",     "Automatic" },
+         { "realtime", "Real time cable" },
          { NULL, NULL },
       },
       "auto"

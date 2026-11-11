@@ -342,11 +342,11 @@ static const u8 gba_header_logo[156] = {
       break;                                                                  \
     }                                                                         \
                                                                               \
-    /* ROR reg */                                                             \
+    /* ROR reg (the count is a byte: it rotates by count % 32) */            \
     case 0x7:                                                                 \
     {                                                                         \
       get_shift_register(reg_sh);                                             \
-      ror(reg_sh, reg_sh, shift);                                             \
+      ror(reg_sh, reg_sh, shift & 0x1F);                                      \
       break;                                                                  \
     }                                                                         \
   }                                                                           \
@@ -497,8 +497,9 @@ static const u8 gba_header_logo[156] = {
       get_shift_register(reg_sh);                                             \
       if(shift != 0)                                                          \
       {                                                                       \
-        c_flag = (reg_sh >> (shift - 1)) & 0x01;                              \
-        ror(reg_sh, reg_sh, shift);                                           \
+        /* By 32, 64...: same value, carry is bit 31 */                       \
+        c_flag = (reg_sh >> ((shift - 1) & 0x1F)) & 0x01;                     \
+        ror(reg_sh, reg_sh, shift & 0x1F);                                    \
       }                                                                       \
       break;                                                                  \
     }                                                                         \
@@ -907,7 +908,8 @@ const u32 spsr_masks[4] = { 0x00000000, 0x000000EF, 0xF0000000, 0xF00000EF };
 #define load_aligned32(address, dest)                                         \
 {                                                                             \
   u32 _address = address;                                                     \
-  u8 *map = memory_map_read[_address >> 15];                                  \
+  /* (The map only covers 0x00000000-0x0FFFFFFF) */                           \
+  u8 *map = (_address < 0x10000000) ? memory_map_read[_address >> 15] : NULL; \
   bool _io_handler = ((_address >> 24) == 0x04) &&                            \
                      io_read_requires_handler(_address);                       \
   if(_address < 0x10000000)                                                   \
@@ -951,8 +953,9 @@ const u32 spsr_masks[4] = { 0x00000000, 0x000000EF, 0xF0000000, 0xF00000EF };
 #define load_memory_u8(address, dest)                                         \
   fast_read_memory(8, u8, address, dest, read_memory8)                        \
 
+/* (u32: an odd address reads the halfword rotated, ROR 8, see read_memory16) */
 #define load_memory_u16(address, dest)                                        \
-  fast_read_memory(16, u16, address, dest, read_memory16)                     \
+  fast_read_memory(16, u32, address, dest, read_memory16)                     \
 
 #define load_memory_u32(address, dest)                                        \
   fast_read_memory(32, u32, address, dest, read_memory32)                     \
@@ -1188,7 +1191,7 @@ inline cpu_alert_type exec_thumb_block_mem(u32 rn, u32 reglist, s32 &cycles_rema
 // Affects N/Z/C flags
 
 #define thumb_shift_lsl_reg()                                                 \
-  u32 shift = reg[rs];                                                        \
+  u32 shift = reg[rs] & 0xFF;   /* (only the bottom byte counts) */           \
   u32 dest = reg[rd];                                                         \
   if(shift != 0)                                                              \
   {                                                                           \
@@ -1208,7 +1211,7 @@ inline cpu_alert_type exec_thumb_block_mem(u32 rn, u32 reglist, s32 &cycles_rema
   }                                                                           \
 
 #define thumb_shift_lsr_reg()                                                 \
-  u32 shift = reg[rs];                                                        \
+  u32 shift = reg[rs] & 0xFF;   /* (only the bottom byte counts) */           \
   u32 dest = reg[rd];                                                         \
   if(shift != 0)                                                              \
   {                                                                           \
@@ -1228,7 +1231,7 @@ inline cpu_alert_type exec_thumb_block_mem(u32 rn, u32 reglist, s32 &cycles_rema
   }                                                                           \
 
 #define thumb_shift_asr_reg()                                                 \
-  u32 shift = reg[rs];                                                        \
+  u32 shift = reg[rs] & 0xFF;   /* (only the bottom byte counts) */           \
   u32 dest = reg[rd];                                                         \
   if(shift != 0)                                                              \
   {                                                                           \
@@ -1245,12 +1248,13 @@ inline cpu_alert_type exec_thumb_block_mem(u32 rn, u32 reglist, s32 &cycles_rema
   }                                                                           \
 
 #define thumb_shift_ror_reg()                                                 \
-  u32 shift = reg[rs];                                                        \
+  u32 shift = reg[rs] & 0xFF;   /* (only the bottom byte counts) */           \
   u32 dest = reg[rd];                                                         \
   if(shift != 0)                                                              \
   {                                                                           \
-    c_flag = (dest >> (shift - 1)) & 0x01;                                    \
-    ror(dest, dest, shift);                                                   \
+    /* By 32, 64...: same value, carry is bit 31 */                           \
+    c_flag = (dest >> ((shift - 1) & 0x1F)) & 0x01;                           \
+    ror(dest, dest, shift & 0x1F);                                            \
   }                                                                           \
 
 #define thumb_shift_lsl_imm()                                                 \
@@ -1378,7 +1382,7 @@ inline cpu_alert_type exec_thumb_block_mem(u32 rn, u32 reglist, s32 &cycles_rema
   {                                                                           \
     thumb_pc_offset(2);                                                       \
   }                                                                           \
-  cycles_remaining -= ws_cyc_nseq[reg[REG_PC] >> 24][0];                      \
+  cycles_remaining -= ws_cyc_nseq[(reg[REG_PC] >> 24) & 0xF][0];                      \
 }                                                                             \
 
 // When a mode change occurs from non-FIQ to non-FIQ retire the current
@@ -2129,7 +2133,7 @@ arm_loop:
                    {
                       reg[REG_PC] = src;
                    }
-                   cycles_remaining -= ws_cyc_nseq[reg[REG_PC] >> 24][1];
+                   cycles_remaining -= ws_cyc_nseq[(reg[REG_PC] >> 24) & 0xF][1];
                 }
                 else
                 {
@@ -3048,7 +3052,7 @@ arm_loop:
                 /* B offset */
                 arm_decode_branch();
                 reg[REG_PC] += offset + 8;
-                cycles_remaining -= ws_cyc_nseq[reg[REG_PC] >> 24][1];
+                cycles_remaining -= ws_cyc_nseq[(reg[REG_PC] >> 24) & 0xF][1];
                 break;
              }
 
@@ -3058,7 +3062,7 @@ arm_loop:
                 arm_decode_branch();
                 reg[REG_LR] = reg[REG_PC] + 4;
                 reg[REG_PC] += offset + 8;
-                cycles_remaining -= ws_cyc_nseq[reg[REG_PC] >> 24][1];
+                cycles_remaining -= ws_cyc_nseq[(reg[REG_PC] >> 24) & 0xF][1];
                 break;
              }
 
@@ -3538,7 +3542,7 @@ thumb_loop:
                 thumb_decode_branch();
                 s32 br_offset = ((s32)(offset << 21) >> 20) + 4;
                 reg[REG_PC] += br_offset;
-                cycles_remaining -= ws_cyc_nseq[reg[REG_PC] >> 24][0];
+                cycles_remaining -= ws_cyc_nseq[(reg[REG_PC] >> 24) & 0xF][0];
                 break;
              }
 
@@ -3559,7 +3563,7 @@ thumb_loop:
                 u32 newpc = reg[REG_LR] + (offset * 2);
                 reg[REG_LR] = newlr;
                 reg[REG_PC] = newpc;
-                cycles_remaining -= ws_cyc_nseq[newpc >> 24][0];
+                cycles_remaining -= ws_cyc_nseq[(newpc >> 24) & 0xF][0];
                 break;
              }
        }

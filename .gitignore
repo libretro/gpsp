@@ -8,3 +8,5 @@ tags
 cscope.out
 pandora/linux
 tools/generate_cc_lut
+obj_b/
+obj/

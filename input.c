@@ -65,7 +65,11 @@ static void trigger_key(u32 key)
   }
 }
 
-u32 update_input(void)
+static void apply_keys(uint32_t new_key);
+
+// The buttons the player is pressing now (with the turbo ones), without
+// handing them to the game.
+static uint32_t read_keys(void)
 {
    unsigned i;
    uint32_t new_key = 0;
@@ -125,6 +129,35 @@ u32 update_input(void)
    else
       turbo_b_counter = 0;
 
+   return new_key;
+}
+
+// Dual Cable Link: the buttons of the player at this console, which are sent
+// to the other one and reach both GBAs some frames later.
+uint32_t input_local_keys(void)
+{
+   return read_keys();
+}
+
+u32 update_input(void)
+{
+   // Dual Cable Link: the buttons for this frame come from the session.
+   if (serial_mode == SERIAL_MODE_DUAL_CABLE)
+   {
+      libretro_ff_enabled = false;   // Both consoles go at the same pace
+      apply_keys(dualport_get_keys());
+      return 0;
+   }
+
+   if (!input_state_cb)
+      return 0;
+
+   apply_keys(read_keys());
+   return 0;
+}
+
+static void apply_keys(uint32_t new_key)
+{
    // GBP keypad detection hack (only once when game ROM starts running).
    // This must work with both boot-to-ROM and boot-to-BIOS flows.
    if (frame_counter == 0)
@@ -168,8 +201,6 @@ u32 update_input(void)
       set_fastforward_override(libretro_ff_enabled);
       libretro_ff_enabled_prev = libretro_ff_enabled;
    }
-
-   return 0;
 }
 
 bool input_check_savestate(const u8 *src)
