@@ -120,7 +120,7 @@ static pthread_mutex_t q_mtx = PTHREAD_MUTEX_INITIALIZER;
 
 /* NET: the other console is in another process, over TCP. */
 static int net_fd = -1, local = -1;
-#define LOCAL(i) (net_fd < 0 || (i) == local)
+#define LOCAL(i) (local < 0 || (i) == local)
 
 static bool read_all(int fd, void *buf, size_t len) {
   unsigned char *b = buf;
