@@ -1819,7 +1819,8 @@ u32 execute_store_cpsr_body()
 
 #define generate_shift_load_operands_reg()                                    \
   generate_load_reg(a0, rd);                                                  \
-  generate_load_reg(a1, rs)                                                   \
+  generate_load_reg(a1, rs);                                                  \
+  generate_and_imm(a1, 0xFF)                                                  \
 
 #define generate_shift_load_operands_imm()                                    \
   generate_load_reg(a0, rs);                                                  \
