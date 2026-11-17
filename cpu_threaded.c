@@ -55,6 +55,8 @@ u8 *ram_translation_ptr = ram_translation_cache;
 #endif
 /* Note, see stub files for more cache definitions */
 
+#define RAM_CACHE_START_OFFSET 16
+
 u32 iwram_code_min = ~0U;
 u32 iwram_code_max =  0U;
 u32 ewram_code_min = ~0U;
@@ -3448,8 +3450,11 @@ void flush_translation_cache_ram(void)
    flush_ram_count, reg[REG_PC], iwram_code_min, iwram_code_max,
    ewram_code_min, ewram_code_max);*/
 
-  last_ram_translation_ptr = ram_translation_cache;
-  ram_translation_ptr = ram_translation_cache;
+  /* RAM block offsets are stored in the tag entries, where zero means "not
+     translated yet". Never emit a block at offset zero, otherwise the first
+     block after a flush is translated again on every lookup. */
+  last_ram_translation_ptr = ram_translation_cache + RAM_CACHE_START_OFFSET;
+  ram_translation_ptr = ram_translation_cache + RAM_CACHE_START_OFFSET;
 
   // Proceed to clean the SMC area if needed
   // (also try to memset as little as possible for performance)
@@ -3493,7 +3498,8 @@ void init_dynarec_caches(void)
   rom_translation_ptr = last_rom_translation_ptr = &rom_translation_cache[0];
   memset(rom_branch_hash, 0, sizeof(rom_branch_hash));
 
-  ram_translation_ptr = last_ram_translation_ptr = &ram_translation_cache[0];
+  ram_translation_ptr = last_ram_translation_ptr =
+    &ram_translation_cache[RAM_CACHE_START_OFFSET];
   memset(iwram, 0, 0x8000);
   memset(&ewram[0x40000], 0, 0x40000);
 
