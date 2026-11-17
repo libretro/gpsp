@@ -1348,19 +1348,35 @@ static void trace_instruction(u32 pc, u32 mode)
     ARM_ORR_REG_IMMSHIFT(0, reg_a2, reg_a2, ARMREG_LR, ARMSHIFT_ASR, 31);
 #endif
 
+/* Memory handlers return with "bx lr" (predictable) to the "b" that follows
+   the call, which skips over the u32 PC word that the slow paths read. */
+#define generate_skip_pc_word()                                               \
+  ARM_B(0, 0)                                                                 \
+
 #define generate_load_call_byte(tblnum)                                       \
   mem_calc_region(0);                                                         \
   generate_add_imm(reg_a2, (STORE_TBL_OFF + 68*tblnum + 4) >> 2, 0);          \
   ARM_LDR_REG_REG_SHIFT(0, reg_a2, reg_base, reg_a2, 0, 2);                   \
   ARM_BLX(0, reg_a2);                                                         \
+  generate_skip_pc_word()                                                     \
 
 #define generate_load_call_mbyte(tblnum, abits)                               \
   mem_calc_region(abits);                                                     \
   generate_add_imm(reg_a2, (STORE_TBL_OFF + 68*tblnum + 4) >> 2, 0);          \
   ARM_LDR_REG_REG_SHIFT(0, reg_a2, reg_base, reg_a2, 0, 2);                   \
   ARM_BLX(0, reg_a2);                                                         \
+  generate_skip_pc_word()                                                     \
 
+/* Store calls followed by a PC word */
 #define generate_store_call(tblnum)                                           \
+  mem_calc_region(0);                                                         \
+  generate_add_imm(reg_a2, (STORE_TBL_OFF + 68*tblnum + 4) >> 2, 0);          \
+  ARM_LDR_REG_REG_SHIFT(0, reg_a2, reg_base, reg_a2, 0, 2);                   \
+  ARM_BLX(0, reg_a2);                                                         \
+  generate_skip_pc_word()                                                     \
+
+/* "Safe" stores (used in STM sequences) have no PC word after the call */
+#define generate_store_call_nopc(tblnum)                                      \
   mem_calc_region(0);                                                         \
   generate_add_imm(reg_a2, (STORE_TBL_OFF + 68*tblnum + 4) >> 2, 0);          \
   ARM_LDR_REG_REG_SHIFT(0, reg_a2, reg_base, reg_a2, 0, 2);                   \
@@ -1370,7 +1386,7 @@ static void trace_instruction(u32 pc, u32 mode)
 #define generate_store_call_u8()        generate_store_call(0)
 #define generate_store_call_u16()       generate_store_call(1)
 #define generate_store_call_u32()       generate_store_call(2)
-#define generate_store_call_u32_safe()  generate_store_call(3)
+#define generate_store_call_u32_safe()  generate_store_call_nopc(3)
 #define generate_load_call_u8()         generate_load_call_byte(4)
 #define generate_load_call_s8()         generate_load_call_byte(5)
 #define generate_load_call_u16()        generate_load_call_mbyte(6, 1)
