@@ -1830,26 +1830,57 @@ static void merge_blend(u32 start, u32 end, u16 *dst, u32 *src) {
   }
 }
 
+#if defined(__GNUC__) || defined(__clang__)
+typedef u32 __attribute__((may_alias)) u32_alias;
+#else
+typedef u32 u32_alias;
+#endif
+
+template <blendtype bldtype>
+static inline u16 brightness_pixel(u32 spix, u32 pa, u32 brightness) {
+  u16 pixcol = palette_ram_converted[spix & 0x1FF];
+
+  if ((spix & 0x200) == 0x200) {
+    // Pixel is 1st target, can apply color effect.
+    u32 epixel = (pixcol | (pixcol << 16)) & BLND_MSK;
+    u32 pb = ((epixel * (16 - brightness)) >> 4) & BLND_MSK;  // Pixel color
+    epixel = (pa + pb) & BLND_MSK;
+    pixcol = (epixel >> 16) | epixel;
+  }
+  return pixcol;
+}
+
 // Applies brighten/darken effect to a bunch of color-indexed pixels.
+// Works on pixel pairs and reuses the result while the pair repeats.
 template <blendtype bldtype>
 static void merge_brightness(u32 start, u32 end, u16 *srcdst) {
   u32 brightness = MIN(16, read_ioreg(REG_BLDY) & 0x1F);
+  u32 pa = bldtype == BLEND_DARK ? 0 : ((BLND_MSK * brightness) >> 4) & BLND_MSK; // B/W
+  u16 *p = &srcdst[start];
+  u16 *pe = &srcdst[end];
 
-  while (start < end) {
-    u16 spix = srcdst[start];
-    u16 pixcol = palette_ram_converted[spix & 0x1FF];
-
-    if ((spix & 0x200) == 0x200) {
-      // Pixel is 1st target, can apply color effect.
-      u32 epixel = (pixcol | (pixcol << 16)) & BLND_MSK;
-      u32 pa = bldtype == BLEND_DARK ? 0 : ((BLND_MSK * brightness) >> 4) & BLND_MSK; // B/W
-      u32 pb = ((epixel * (16 - brightness)) >> 4) & BLND_MSK;  // Pixel color
-      epixel = (pa + pb) & BLND_MSK;
-      pixcol = (epixel >> 16) | epixel;
-    }
-
-    srcdst[start++] = pixcol;
+  if (p < pe && ((uintptr_t)p & 2)) {
+    *p = brightness_pixel<bldtype>(*p, pa, brightness);
+    p++;
   }
+  if (pe - p >= 2) {
+    u32_alias *w = (u32_alias*)p;
+    u32_alias *we = w + (pe - p) / 2;
+    u32 last_in = ~*w;
+    u32 last_out = 0;
+    while (w < we) {
+      u32 in = *w;
+      if (in != last_in) {
+        last_in = in;
+        last_out = brightness_pixel<bldtype>(in & 0xFFFF, pa, brightness) |
+                   (brightness_pixel<bldtype>(in >> 16, pa, brightness) << 16);
+      }
+      *w++ = last_out;
+    }
+    p = (u16*)w;
+  }
+  if (p < pe)
+    *p = brightness_pixel<bldtype>(*p, pa, brightness);
 }
 
 // Fills a segment using the backdrop color (in the right mode).
