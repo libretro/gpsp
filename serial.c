@@ -21,7 +21,7 @@
 
 int serial_mode = SERIAL_MODE_AUTO;
 
-static u32 serial_irq_cycles = 0;
+u32 serial_irq_cycles = 0;
 
 /* Savestate accessors for the serial-IRQ scheduler. The pending-cycles
  * counter must be persisted: without it, a state saved mid-transaction

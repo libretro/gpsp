@@ -26,6 +26,13 @@
 #define SERIAL_MODE_AUTO          6  // Choose best fit automatically
 
 extern int serial_mode;
+extern u32 serial_irq_cycles;
+
+// Whether update_serial() has anything to do (a device to tick or an IRQ due).
+static inline bool update_serial_needed(void) {
+  return serial_irq_cycles || (serial_mode >= SERIAL_MODE_RFU &&
+                               serial_mode <= SERIAL_MODE_SERIAL_AW2);
+}
 
 // Register writes
 cpu_alert_type write_siocnt(u16 value);

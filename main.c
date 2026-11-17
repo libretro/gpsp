@@ -147,7 +147,7 @@ u32 function_cc update_gba(int remaining_cycles)
     // Timers can trigger DMA (usually sound) and consume cycles
     dma_cycles = update_timers(&irq_raised, completed_cycles);
     // Check for serial port IRQs as well.
-    if (update_serial(completed_cycles))
+    if (update_serial_needed() && update_serial(completed_cycles))
       irq_raised |= IRQ_SERIAL;
 
     // Video count tracks the video cycles remaining until the next event
