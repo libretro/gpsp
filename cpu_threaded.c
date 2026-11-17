@@ -223,6 +223,13 @@ typedef struct
   #include "x86/x86_emit.h"
 #endif
 
+/* Backends can emit out-of-line ("cold") code at the end of each block */
+#ifndef generate_block_cold_reset
+  #define generate_block_cold_reset()
+  #define generate_block_cold_stubs()
+  #define generate_block_cold_size()   0
+#endif
+
 /* Cache invalidation */
 
 #if defined(PSP)
@@ -2988,8 +2995,9 @@ u8 function_cc *block_lookup_address_thumb(u32 pc)
   while(--block_data_position >= 0)                                           \
   {                                                                           \
     flag_status = block_data[block_data_position].flag_data;                  \
+    /* Bits 12-15: flags live after this instruction (used by emitters) */   \
     block_data[block_data_position].flag_data =                               \
-     (flag_status & needed_mask);                                             \
+     (flag_status & needed_mask) | ((needed_mask & 0x0F) << 12);              \
     needed_mask &= ~((flag_status >> 4) & 0x0F);                              \
     needed_mask |= flag_status >> 8;                                          \
   }                                                                           \
@@ -3179,6 +3187,7 @@ bool translate_block_arm(u32 pc, bool ram_region)
   }
 
   generate_block_prologue();
+  generate_block_cold_reset();
 
   /* This is a function because it's used a lot more than it might seem (all
      of the data processing functions can access it), and its expansion was
@@ -3231,7 +3240,7 @@ bool translate_block_arm(u32 pc, bool ram_region)
        a simple recursive call here won't work, it has to pedal out to
        the beginning. */
 
-    if(translation_ptr > translation_cache_limit) {
+    if(translation_ptr + generate_block_cold_size() > translation_cache_limit) {
       if (ram_region)
         flush_translation_cache_ram();
       else
@@ -3256,6 +3265,7 @@ bool translate_block_arm(u32 pc, bool ram_region)
   /* Unconditionally generate translation targets. In case we hit one or
      in the unlikely case that block was too big (and not finalized) */
   generate_translation_gate(arm);
+  generate_block_cold_stubs();
 
   for(i = 0; i < block_exit_position; i++)
   {
@@ -3327,6 +3337,7 @@ bool translate_block_thumb(u32 pc, bool ram_region)
   }
 
   generate_block_prologue();
+  generate_block_cold_reset();
 
   /* This is a function because it's used a lot more than it might seem (all
      of the data processing functions can access it), and its expansion was
@@ -3377,7 +3388,7 @@ bool translate_block_thumb(u32 pc, bool ram_region)
        a simple recursive call here won't work, it has to pedal out to
        the beginning. */
 
-    if(translation_ptr > translation_cache_limit)
+    if(translation_ptr + generate_block_cold_size() > translation_cache_limit)
     {
       if (ram_region)
         flush_translation_cache_ram();
@@ -3398,6 +3409,7 @@ bool translate_block_thumb(u32 pc, bool ram_region)
   /* Unconditionally generate translation targets. In case we hit one or
      in the unlikely case that block was too big (and not finalized) */
   generate_translation_gate(thumb);
+  generate_block_cold_stubs();
 
   for(i = 0; i < block_exit_position; i++)
   {
