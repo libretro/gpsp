@@ -1505,6 +1505,10 @@ static bool rtc_utc_offset_valid = false;
 /* The offset at content load, for states saved without one. */
 static s32 rtc_start_utc_offset = 0;
 static bool rtc_start_utc_offset_valid = false;
+/* System Clock mode: the frontend's time, read once per frame. */
+static s64 rtc_frame_time = 0;
+static s32 rtc_frame_utc_offset = 0;
+static bool rtc_frame_time_valid = false;
 
 void rtc_set_time_source(rtc_time_source_type source)
 {
@@ -1558,8 +1562,17 @@ static struct tm *rtc_local_time(void)
 
   if (rtc_time_source == RTC_TIME_SOURCE_SYSTEM)
   {
-    t = time(NULL);
-    return localtime(&t);
+    if (!rtc_calendar)
+    {
+      t = time(NULL);
+      return localtime(&t);
+    }
+    /* Invalid while the frontend holds its clock: stay deterministic. */
+    if (rtc_frame_time_valid)
+    {
+      t = (time_t)(rtc_frame_time + rtc_frame_utc_offset);
+      return gmtime(&t);
+    }
   }
 
   t = (time_t)(rtc_base_time + rtc_elapsed_seconds());
@@ -1570,6 +1583,23 @@ static struct tm *rtc_local_time(void)
   }
 
   return localtime(&t);
+}
+
+void rtc_frame_update(void)
+{
+  struct retro_calendar_time now;
+
+  if (!rtc_enabled || rtc_time_source != RTC_TIME_SOURCE_SYSTEM ||
+      !rtc_calendar)
+    return;
+
+  rtc_frame_time_valid = rtc_calendar->get_current_time &&
+                         rtc_calendar->get_current_time(&now);
+  if (rtc_frame_time_valid)
+  {
+    rtc_frame_time       = now.sec;
+    rtc_frame_utc_offset = now.utc_offset;
+  }
 }
 
 /* Before retro_reset zeroes frame_counter: with the frontend's clock the

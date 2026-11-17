@@ -1381,6 +1381,7 @@ void retro_run(void)
 
    input_poll_cb();
    update_input();
+   rtc_frame_update();
 
    rumble_frame_reset();
 
