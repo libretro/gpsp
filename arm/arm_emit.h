@@ -450,12 +450,19 @@ u32 arm_disect_imm_32bit(u32 imm, u32 *stores, u32 *rotations)
   write32(new_pc);                                                            \
   generate_branch_filler(ARMCOND_AL, writeback_location)                      \
 
+/* Checks the cycle counter (negative means there are cycles left) using a
+   regular conditional branch, which the CPU can predict, unlike a computed
+   jump. Guest flags live in the host CPSR, so they are saved in reg_a2
+   (preserved by the update handler, which only returns here if the PC did
+   not change, so flags are still valid) and restored on both paths. */
 #define generate_branch_update(writeback_location, new_pc, mode)              \
-  ARM_MOV_REG_IMMSHIFT(0, reg_a0, reg_cycles, ARMSHIFT_LSR, 31);              \
-  /* If counter is negative, skip the update call (2 insts) */                \
-  ARM_ADD_REG_IMMSHIFT(0, ARMREG_PC, ARMREG_PC, reg_a0, ARMSHIFT_LSL, 3);     \
+  ARM_MRS_CPSR(0, reg_a2);                                                    \
+  ARM_CMP_REG_IMM(0, reg_cycles, 0, 0);                                       \
+  ARM_B_COND(0, ARMCOND_MI, 3);            /* cycles left: skip update */     \
+  ARM_B(0, 0);                             /* skip over the PC word */        \
   write32(new_pc);                                                            \
   generate_function_far_call(armfn_gbaup_##mode);   /* 2 instructions */      \
+  ARM_MSR_REG(0, ARM_PSR_F, reg_a2, ARM_CPSR);                                \
   generate_branch_filler(ARMCOND_AL, writeback_location)                      \
 
 
