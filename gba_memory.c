@@ -1524,6 +1524,11 @@ void rtc_set_calendar(const struct retro_calendar_time_interface *calendar)
 #define GBA_CYCLES_PER_FRAME 280896
 #define GBA_FRAME_SECONDS    ((double)GBA_CYCLES_PER_FRAME / (double)GBC_BASE_RATE)
 
+static s64 rtc_elapsed_seconds(void)
+{
+  return (s64)((double)frame_counter * GBA_FRAME_SECONDS);
+}
+
 static void rtc_init_base_time(void)
 {
   struct retro_calendar_time start;
@@ -1557,8 +1562,7 @@ static struct tm *rtc_local_time(void)
     return localtime(&t);
   }
 
-  t = (time_t)(rtc_base_time +
-               (s64)((double)frame_counter * GBA_FRAME_SECONDS));
+  t = (time_t)(rtc_base_time + rtc_elapsed_seconds());
   if (rtc_utc_offset_valid)
   {
     t += rtc_utc_offset;
@@ -1566,6 +1570,14 @@ static struct tm *rtc_local_time(void)
   }
 
   return localtime(&t);
+}
+
+/* Before retro_reset zeroes frame_counter: with the frontend's clock the
+ * RTC keeps running across reset, like a battery-backed one. */
+void rtc_carry_elapsed_time(void)
+{
+  if (rtc_utc_offset_valid)
+    rtc_base_time += rtc_elapsed_seconds();
 }
 
 
@@ -3314,11 +3326,12 @@ u32 load_gamepak(const struct retro_game_info* info, const char *name,
       rumble_enabled = (force_rumble == FEAT_ENABLE);
 
    /* Capture the RTC baseline once per content load (and only here -
-    * not in init_memory/reset_gba, so a retro_reset does not change the
-    * baseline; the in-game clock instead snaps back to the load-time
-    * point since frame_counter is reset to 0).  This makes the entire
-    * RTC stream a deterministic function of frame_counter and
-    * rtc_base_time, both of which are persisted in the savestate. */
+    * not in init_memory/reset_gba, so a retro_reset does not re-read the
+    * baseline; without the frontend's clock the in-game clock instead
+    * snaps back to the load-time point since frame_counter is reset to
+    * 0).  This makes the entire RTC stream a deterministic function of
+    * frame_counter and rtc_base_time, both of which are persisted in the
+    * savestate. */
    rtc_init_base_time();
 
    return 0;

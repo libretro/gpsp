@@ -853,6 +853,7 @@ void retro_set_controller_port_device(unsigned port, unsigned device) {}
 
 void retro_reset(void)
 {
+   rtc_carry_elapsed_time();
    reset_gba();
 }
 
