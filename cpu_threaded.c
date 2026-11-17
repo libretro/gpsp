@@ -3440,8 +3440,23 @@ void init_bios_hooks(void)
   rom_cache_watermark = (u32)(rom_translation_ptr - rom_translation_cache);
 }
 
+#if defined(ARM_ARCH)
+/* Indirect branch target cache, used by the ARM stubs (see arm_stub.S).
+   Pairs of {key, host address}; a zero key never matches. It must be
+   cleared whenever translated code is discarded. */
+#define IBTC_ENTRIES 1024
+u32 ibtc_table[IBTC_ENTRIES * 2] __attribute__((aligned(64)));
+static void ibtc_clear(void)
+{
+  memset(ibtc_table, 0, sizeof(ibtc_table));
+}
+#else
+static void ibtc_clear(void) {}
+#endif
+
 void flush_translation_cache_ram(void)
 {
+  ibtc_clear();
   /* Flushes RAM caches avoiding doing too much work (ie. wiping unused memory) */
   flush_ram_count++;
   /*printf("ram flush %d (pc %x), %x to %x, %x to %x\n",
@@ -3481,6 +3496,7 @@ void flush_translation_cache_ram(void)
 void flush_translation_cache_rom(void)
 {
   /* We flush the generated code except for everything below the watermark. */
+  ibtc_clear();
   last_rom_translation_ptr = &rom_translation_cache[rom_cache_watermark];
   rom_translation_ptr      = &rom_translation_cache[rom_cache_watermark];
 
@@ -3490,6 +3506,7 @@ void flush_translation_cache_rom(void)
 void init_dynarec_caches(void)
 {
   /* Initialize caches so that we can start initalizing the emitter. */
+  ibtc_clear();
   rom_translation_ptr = last_rom_translation_ptr = &rom_translation_cache[0];
   memset(rom_branch_hash, 0, sizeof(rom_branch_hash));
 

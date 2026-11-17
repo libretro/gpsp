@@ -249,6 +249,47 @@ cheat_hook_builder(arm)
 cheat_hook_builder(thumb)
 
 
+@ Indirect branch target cache (IBTC). Maps a guest PC (plus mode) to the
+@ host address of its translated block, so that indirect branches (function
+@ returns, jump tables...) do not need to call the C block lookup functions
+@ every time. Keys: Thumb = pc | 1, ARM = (pc & ~3) | 2. A zero key is never
+@ valid so a cleared table never hits. The table is wiped by the C code
+@ every time any translation cache is flushed (see ibtc_clear).
+@ Uses r1, r2 and lr as temporaries (all dead at an indirect branch), the
+@ key must be in r2 (preserved by call_c_function).
+
+#define ibtc_entry_addr(dst)                                                 ;\
+  eor lr, r2, r2, lsr #12                 /* hash the key                  */;\
+  ldr dst, =ibtc_table                                                       ;\
+  mov lr, lr, lsl #21                                                        ;\
+  mov lr, lr, lsr #22                     /* 10 bit index                  */;\
+  add dst, dst, lr, lsl #3                /* 8 byte entries                */;\
+
+#define ibtc_lookup()                                                        ;\
+  ibtc_entry_addr(r1)                                                        ;\
+  ldr lr, [r1]                            /* cached key                    */;\
+  cmp lr, r2                                                                 ;\
+  bne 98f                                 /* miss, go slow path            */;\
+  ldr r0, [r1, #4]                        /* host block address            */;\
+  restore_flags()                                                            ;\
+  bx r0                                                                      ;\
+98:
+
+#define ibtc_fill()                                                          ;\
+  cmn r0, #1                              /* do not cache bad targets      */;\
+  beq 99f                                                                    ;\
+  ibtc_entry_addr(r1)                                                        ;\
+  str r2, [r1]                                                               ;\
+  str r0, [r1, #4]                                                           ;\
+99:
+
+#define ibtc_key_arm()                                                       ;\
+  bic r2, r0, #3                                                             ;\
+  orr r2, r2, #2                                                             ;\
+
+#define ibtc_key_thumb()                                                     ;\
+  orr r2, r0, #1                                                             ;\
+
 @ These are b stubs for performing indirect branches. They are not
 @ linked to and don't return, instead they link elsewhere.
 
@@ -257,13 +298,19 @@ cheat_hook_builder(thumb)
 
 defsymbl(arm_indirect_branch_arm)
   save_flags()
+  ibtc_key_arm()
+  ibtc_lookup()
   call_c_function(block_lookup_address_arm)
+  ibtc_fill()
   restore_flags()
   bx r0
 
 defsymbl(arm_indirect_branch_thumb)
   save_flags()
+  ibtc_key_thumb()
+  ibtc_lookup()
   call_c_function(block_lookup_address_thumb)
+  ibtc_fill()
   restore_flags()
   bx r0
 
@@ -272,7 +319,10 @@ defsymbl(arm_indirect_branch_dual_arm)
   tst r0, #0x01                           @ check lower bit
   bne 1f                                  @ if set going to Thumb mode
   add r0, #2                              @ two LSB are cleared after
+  ibtc_key_arm()
+  ibtc_lookup()
   call_c_function(block_lookup_address_arm)
+  ibtc_fill()
   restore_flags()
   bx r0                                   @ keep executing arm code
 1:
@@ -281,7 +331,10 @@ defsymbl(arm_indirect_branch_dual_arm)
   load_registers_thumb()                  @ load in Thumb registers
   orr r1, r1, #0x20                       @ set Thumb mode
   str r1, [reg_base, #REG_CPSR]           @ store flags
+  ibtc_key_thumb()
+  ibtc_lookup()
   call_c_function(block_lookup_address_thumb)
+  ibtc_fill()
   restore_flags()
   bx r0       
 .size arm_indirect_branch_dual_arm, .-arm_indirect_branch_dual_arm
@@ -290,7 +343,10 @@ defsymbl(arm_indirect_branch_dual_thumb)
   save_flags()
   tst r0, #0x01                           @ check lower bit
   beq 1f                                  @ if set going to ARM mode
+  ibtc_key_thumb()
+  ibtc_lookup()
   call_c_function(block_lookup_address_thumb)
+  ibtc_fill()
   restore_flags()
   bx r0                                   @ keep executing thumb code
 1:
@@ -300,10 +356,15 @@ defsymbl(arm_indirect_branch_dual_thumb)
   bic r1, r1, #0x20                       @ clear Thumb mode
   str r1, [reg_base, #REG_CPSR]           @ store flags
   add r0, #2                              @ two LSB are cleared after
+  ibtc_key_arm()
+  ibtc_lookup()
   call_c_function(block_lookup_address_arm)
+  ibtc_fill()
   restore_flags()
   bx r0
 .size arm_indirect_branch_dual_thumb, .-arm_indirect_branch_dual_thumb
+
+.pool
 
 @ Update the cpsr.
 
