@@ -2988,8 +2988,9 @@ u8 function_cc *block_lookup_address_thumb(u32 pc)
   while(--block_data_position >= 0)                                           \
   {                                                                           \
     flag_status = block_data[block_data_position].flag_data;                  \
+    /* Bits 12-15: flags live after this instruction (used by emitters) */   \
     block_data[block_data_position].flag_data =                               \
-     (flag_status & needed_mask);                                             \
+     (flag_status & needed_mask) | ((needed_mask & 0x0F) << 12);              \
     needed_mask &= ~((flag_status >> 4) & 0x0F);                              \
     needed_mask |= flag_status >> 8;                                          \
   }                                                                           \

@@ -1546,17 +1546,50 @@ static void trace_instruction(u32 pc, u32 mode)
 
 #define arm_block_memory_writeback_pre_store(writeback_type)
 
+#define arm_block_fast_ok_load(s_bit)   (!arm_block_sbit_##s_bit)
+#define arm_block_fast_ok_store(s_bit)  (!arm_block_sbit_##s_bit && !(reg_list & 0x8000))
+#define arm_block_sbit_yes 1
+#define arm_block_sbit_no  0
+#define arm_block_is_store_store 1
+#define arm_block_is_store_load  0
+
+/* Stores do the writeback after all the stores (see the slow path) */
+#define arm_block_fast_post_store(writeback_type)                             \
+  arm_block_memory_writeback_post_store(writeback_type)                       \
+
+#define arm_block_fast_post_load(writeback_type)                              \
+
 #define arm_block_memory(access_type, offset_type, writeback_type, s_bit)     \
 {                                                                             \
   arm_decode_block_trans();                                                   \
   u32 offset = 0;                                                             \
   u32 i;                                                                      \
+  u8 *fast_fails[4];                                                          \
+  u32 fast_nfails = 0;                                                        \
+  u8 *fast_done = NULL;                                                       \
+  u8 fast_regs[16];                                                           \
+  u32 fast_n = 0;                                                             \
                                                                               \
   arm_generate_load_reg(reg_s0, rn);                                          \
   arm_block_memory_offset_##offset_type();                                    \
   arm_block_memory_writeback_pre_##access_type(writeback_type);               \
   ARM_BIC_REG_IMM(0, reg_s0, reg_s0, 0x03, 0);                                \
   arm_generate_store_reg(reg_s0, REG_SAVE);                                   \
+                                                                              \
+  for(i = 0; i < 16; i++)                                                     \
+    if((reg_list >> i) & 0x01)                                                \
+      fast_regs[fast_n++] = i;                                                \
+                                                                              \
+  if(fast_n && arm_block_fast_ok_##access_type(s_bit))                        \
+  {                                                                           \
+    fast_nfails = emit_blkmem_fast(&translation_ptr,                          \
+      arm_block_is_store_##access_type, arm_register_allocation,              \
+      fast_regs, fast_n, true, fast_fails);                                   \
+    arm_block_fast_post_##access_type(writeback_type);                        \
+    fast_done = translation_ptr;                                              \
+    ARM_B(0, 0);                                                              \
+    blkmem_fast_slow_entry(fast_fails, fast_nfails, true);                    \
+  }                                                                           \
                                                                               \
   for(i = 0; i < 16; i++)                                                     \
   {                                                                           \
@@ -1578,6 +1611,9 @@ static void trace_instruction(u32 pc, u32 mode)
     }                                                                         \
   }                                                                           \
                                                                               \
+  /* Both paths join here (with the loaded PC in reg_a0 if any) */            \
+  if(fast_done)                                                               \
+    generate_branch_patch_unconditional(fast_done, translation_ptr);          \
   arm_block_memory_adjust_pc_##access_type();                                 \
 }                                                                             \
 
@@ -1791,6 +1827,11 @@ static void trace_instruction(u32 pc, u32 mode)
 
 /* TODO: Make these use cached registers. Implement iwram_stack_optimize. */
 
+/* Flags that are needed after the current instruction (see the Thumb
+   dead flag elimination pass) */
+#define thumb_flags_live_after()  ((flag_status >> 12) & 0x0F)
+
+
 #define thumb_block_address_preadjust_down()                                  \
   generate_sub_imm(reg_s0, (bit_count[reg_list] * 4), 0)                      \
 
@@ -1865,17 +1906,171 @@ static void trace_instruction(u32 pc, u32 mode)
 #define thumb_block_memory_final_pop_pc(access_type)                          \
   thumb_block_memory_##access_type()                                          \
 
+/* Fast path for block transfers (LDM/STM, PUSH/POP) that fully hit IWRAM or
+ * EWRAM, which is the common case (stack accesses). It checks that the whole
+ * transfer lies within one 32KB page of IWRAM/EWRAM and, for stores, that no
+ * translated code lives there (SMC tags are zero). If any check fails it
+ * branches to the regular (slow) path, which is emitted right after by the
+ * caller and is left untouched. The slow path must start by restoring the
+ * guest flags (see blkmem_fast_slow_entry) if keep_flags is set.
+ *
+ * Input: reg_s0 holds the (word aligned) start address, regs[] lists the
+ * guest registers in ascending address order. Uses r0, r1, r2 (saved flags),
+ * r9 and lr as temporaries. On success, host flags are restored and loaded
+ * registers written. Returns the number of branches stored in fails[].
+ */
+static u32 emit_blkmem_fast(u8 **tptr, bool store, const u32 *ralloc,
+                            const u8 *regs, u32 n, bool keep_flags,
+                            u8 **fails)
+{
+  u8 *translation_ptr = *tptr;
+  u8 *to_ewram, *to_common;
+  u32 k, nfails = 0;
+
+  if (keep_flags) {
+    ARM_MRS_CPSR(0, reg_a2);
+  }
+
+  /* First and last word must be in the same 32KB page */
+  ARM_MOV_REG_IMMSHIFT(0, reg_a0, reg_s0, ARMSHIFT_LSR, 15);
+  ARM_ADD_REG_IMM(0, reg_a1, reg_s0, (n * 4 - 4), 0);
+  ARM_CMP_REG_IMMSHIFT(0, reg_a0, reg_a1, ARMSHIFT_LSR, 15);
+  fails[nfails++] = translation_ptr;
+  ARM_B_COND(0, ARMCOND_NE, 0);
+
+  ARM_MOV_REG_IMMSHIFT(0, reg_a1, reg_s0, ARMSHIFT_LSR, 24);
+  ARM_CMP_REG_IMM(0, reg_a1, 3, 0);
+  to_ewram = translation_ptr;
+  ARM_B_COND(0, ARMCOND_NE, 0);
+
+  /* IWRAM: data at reg_base + IWRAM_OFF + 0x8000, tags 0x8000 below */
+  ARM_MOV_REG_IMMSHIFT(0, reg_a0, reg_s0, ARMSHIFT_LSL, 17);
+  ARM_SUB_REG_IMM(0, reg_a1, reg_base, 0xA, arm_imm_lsl_to_rot(16));
+  ARM_ADD_REG_IMMSHIFT(0, reg_a0, reg_a1, reg_a0, ARMSHIFT_LSR, 17);
+  if (store) {
+    ARM_SUB_REG_IMM(0, reg_s0, reg_a0, 0x8, arm_imm_lsl_to_rot(12));
+  }
+  to_common = translation_ptr;
+  ARM_B(0, 0);
+
+  /* EWRAM: data at reg_base + EWRAM_OFF, tags 0x40000 above */
+  generate_branch_patch_conditional(to_ewram, translation_ptr);
+  ARM_CMP_REG_IMM(0, reg_a1, 2, 0);
+  fails[nfails++] = translation_ptr;
+  ARM_B_COND(0, ARMCOND_NE, 0);
+  ARM_MOV_REG_IMMSHIFT(0, reg_a0, reg_s0, ARMSHIFT_LSL, 14);
+  ARM_SUB_REG_IMM(0, reg_a1, reg_base, 0x8, arm_imm_lsl_to_rot(16));
+  ARM_ADD_REG_IMMSHIFT(0, reg_a0, reg_a1, reg_a0, ARMSHIFT_LSR, 14);
+  if (store) {
+    ARM_ADD_REG_IMM(0, reg_s0, reg_a0, 0x4, arm_imm_lsl_to_rot(16));
+  }
+  generate_branch_patch_unconditional(to_common, translation_ptr);
+
+  if (store) {
+    /* Any code in the destination? Let the slow path deal with it */
+    ARM_LDR_IMM(0, reg_a1, reg_s0, 0);
+    for (k = 1; k < n; k++) {
+      ARM_LDR_IMM(0, ARMREG_LR, reg_s0, k * 4);
+      ARM_ORR_REG_REG(0, reg_a1, reg_a1, ARMREG_LR);
+    }
+    ARM_CMP_REG_IMM(0, reg_a1, 0, 0);
+    fails[nfails++] = translation_ptr;
+    ARM_B_COND(0, ARMCOND_NE, 0);
+
+    for (k = 0; k < n; k++) {
+      u32 hreg = ralloc[regs[k]];
+      if (hreg != mem_reg) {
+        ARM_STR_IMM(0, hreg, reg_a0, k * 4);
+      } else {
+        ARM_LDR_IMM(0, reg_a1, reg_base, regs[k] * 4);
+        ARM_STR_IMM(0, reg_a1, reg_a0, k * 4);
+      }
+    }
+  } else {
+    for (k = 0; k < n; k++) {
+      u32 hreg = ralloc[regs[k]];
+      if (hreg != mem_reg) {
+        /* Note that PC (if present, it's the last one) maps to reg_a0 */
+        ARM_LDR_IMM(0, hreg, reg_a0, k * 4);
+      } else {
+        ARM_LDR_IMM(0, reg_a1, reg_a0, k * 4);
+        ARM_STR_IMM(0, reg_a1, reg_base, regs[k] * 4);
+      }
+    }
+  }
+
+  if (keep_flags) {
+    ARM_MSR_REG(0, ARM_PSR_F, reg_a2, ARM_CPSR);
+  }
+
+  *tptr = translation_ptr;
+  return nfails;
+}
+
+/* Patches the fast path failure branches to point here and restores flags */
+#define blkmem_fast_slow_entry(fails, nfails, keep_flags)                     \
+{                                                                             \
+  u32 __f;                                                                    \
+  for (__f = 0; __f < nfails; __f++)                                          \
+    generate_branch_patch_conditional(fails[__f], translation_ptr);           \
+  if (keep_flags) {                                                           \
+    ARM_MSR_REG(0, ARM_PSR_F, reg_a2, ARM_CPSR);                              \
+  }                                                                           \
+}                                                                             \
+
+
+#define thumb_block_extra_reg_no      0
+#define thumb_block_extra_reg_up      0
+#define thumb_block_extra_reg_down    0
+#define thumb_block_extra_reg_push_lr REG_LR
+#define thumb_block_extra_reg_pop_pc  REG_PC
+
+
+#define thumb_block_fast_exit_no()      { fast_done = translation_ptr; ARM_B(0, 0); }
+#define thumb_block_fast_exit_up()      { fast_done = translation_ptr; ARM_B(0, 0); }
+#define thumb_block_fast_exit_down()    { fast_done = translation_ptr; ARM_B(0, 0); }
+#define thumb_block_fast_exit_push_lr() { fast_done = translation_ptr; ARM_B(0, 0); }
+#define thumb_block_fast_exit_pop_pc()                                        \
+{                                                                             \
+  /* PC was loaded into reg_a0, emit the same exit as the slow path */        \
+  u32 __saved_cc = cycle_count;                                               \
+  cycle_count += bit_count[reg_list];                                         \
+  generate_indirect_branch_cycle_update(thumb);                               \
+  cycle_count = __saved_cc;                                                   \
+}                                                                             \
+
 #define thumb_block_memory(access_type, pre_op, post_op, base_reg)            \
 {                                                                             \
   thumb_decode_rlist();                                                       \
   u32 i;                                                                      \
   u32 offset = 0;                                                             \
+  u8 *fast_fails[4];                                                          \
+  u32 fast_nfails = 0;                                                        \
+  u8 *fast_done = NULL;                                                       \
+  u8 fast_regs[9];                                                            \
+  u32 fast_n = 0;                                                             \
+  bool fast_flags = thumb_flags_live_after() != 0;                            \
                                                                               \
   thumb_generate_load_reg(reg_s0, base_reg);                                  \
   ARM_BIC_REG_IMM(0, reg_s0, reg_s0, 0x03, 0);                                \
   thumb_block_address_preadjust_##pre_op();                                   \
   thumb_block_address_postadjust_##post_op(base_reg);                         \
   thumb_generate_store_reg(reg_s0, REG_SAVE);                                 \
+                                                                              \
+  for(i = 0; i < 8; i++)                                                      \
+    if((reg_list >> i) & 0x01)                                                \
+      fast_regs[fast_n++] = i;                                                \
+  if(thumb_block_extra_reg_##post_op)                                         \
+    fast_regs[fast_n++] = thumb_block_extra_reg_##post_op;                    \
+                                                                              \
+  if(fast_n)                                                                  \
+  {                                                                           \
+    fast_nfails = emit_blkmem_fast(&translation_ptr,                          \
+      thumb_block_is_store_##access_type, thumb_register_allocation,          \
+      fast_regs, fast_n, fast_flags, fast_fails);                             \
+    thumb_block_fast_exit_##post_op();                                        \
+    blkmem_fast_slow_entry(fast_fails, fast_nfails, fast_flags);              \
+  }                                                                           \
                                                                               \
   for(i = 0; i < 8; i++)                                                      \
   {                                                                           \
@@ -1898,7 +2093,12 @@ static void trace_instruction(u32 pc, u32 mode)
   }                                                                           \
                                                                               \
   thumb_block_memory_extra_##post_op();                                       \
+  if(fast_done)                                                               \
+    generate_branch_patch_unconditional(fast_done, translation_ptr);          \
 }                                                                             \
+
+#define thumb_block_is_store_store 1
+#define thumb_block_is_store_load  0
 
 #define thumb_conditional_branch(condition)                                   \
 {                                                                             \
