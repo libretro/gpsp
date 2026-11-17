@@ -586,10 +586,19 @@ ext_store_oam_ram_u##store_type:                                             ;\
 ext_store_ignore:
   add pc, lr, #4                          @ return
 
+@ STM ("safe") stores are not followed by a PC word, so they must return
+@ straight to lr: returning to lr + 4 would skip the next instruction.
+ext_store_ignore_u32_safe:
+  bx lr                                   @ return
+
+.set ext_store_ignore_u8,  ext_store_ignore
+.set ext_store_ignore_u16, ext_store_ignore
+.set ext_store_ignore_u32, ext_store_ignore
+
 #define store_lookup_table(store_type)                                       ;\
-  .word ext_store_ignore                  /*   -1: ignore, for > 0x0F      */;\
-  .word ext_store_ignore                  /* 0x00: BIOS, ignore            */;\
-  .word ext_store_ignore                  /* 0x01: ignore                  */;\
+  .word ext_store_ignore_u##store_type    /*   -1: ignore, for > 0x0F      */;\
+  .word ext_store_ignore_u##store_type    /* 0x00: BIOS, ignore            */;\
+  .word ext_store_ignore_u##store_type    /* 0x01: ignore                  */;\
   .word ext_store_ewram_u##store_type     /* 0x02: ewram                   */;\
   .word ext_store_iwram_u##store_type     /* 0x03: iwram                   */;\
   .word ext_io_store_u##store_type        /* 0x04: I/O regs                */;\
@@ -597,13 +606,13 @@ ext_store_ignore:
   .word ext_store_vram_u##store_type      /* 0x06: vram                    */;\
   .word ext_store_oam_ram_u##store_type   /* 0x07: oam ram                 */;\
   .word ext_store_u##store_type           /* 0x08: gamepak: ignore         */;\
-  .word ext_store_ignore                  /* 0x09: gamepak: ignore         */;\
-  .word ext_store_ignore                  /* 0x0A: gamepak: ignore         */;\
-  .word ext_store_ignore                  /* 0x0B: gamepak: ignore         */;\
-  .word ext_store_ignore                  /* 0x0C: gamepak: ignore         */;\
+  .word ext_store_ignore_u##store_type    /* 0x09: gamepak: ignore         */;\
+  .word ext_store_ignore_u##store_type    /* 0x0A: gamepak: ignore         */;\
+  .word ext_store_ignore_u##store_type    /* 0x0B: gamepak: ignore         */;\
+  .word ext_store_ignore_u##store_type    /* 0x0C: gamepak: ignore         */;\
   .word ext_store_u##store_type           /* 0x0D: EEPROM                  */;\
   .word ext_store_u##store_type           /* 0x0E: backup                  */;\
-  .word ext_store_ignore                  /* 0x0F: ignore                  */;\
+  .word ext_store_ignore_u##store_type    /* 0x0F: ignore                  */;\
 
 execute_store_builder(8,  strb, strh, ldrb)
 execute_store_builder(16, strh, strh, ldrh)
