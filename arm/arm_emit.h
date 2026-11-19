@@ -1911,8 +1911,10 @@ typedef struct {
 
 #define MAX_COLD_STUBS      256
 /* Upper bound of the size of a cold stub, in bytes */
-#define COLD_STUB_MAX_SIZE  (32 * 4)
+#define COLD_STUB_MAX_SIZE  (48 * 4)
 static cold_mem_type cold_stubs[MAX_COLD_STUBS];
+/* Set if ROM pages can be unmapped (the ROM is swapped in on demand) */
+static bool rom_pages_can_miss = true;
 static u32 cold_stub_count = 0;
 
 static void emit_mem_access(u8 **tptr, u32 kind, bool store, bool keep_flags,
@@ -1984,8 +1986,55 @@ static void emit_cold_stubs(u8 **tptr)
     ARM_B(0, 0);
     generate_branch_patch_unconditional(back, cs->ret);
 
-    /* Slow path: the regular memory handler */
     generate_branch_patch_conditional(to_slow_region, translation_ptr);
+    if (!cs->store) {
+      /* Loads from mapped ROM (regions 8 to 0xC), using the read map like
+         the regular handler does. Unmapped pages take the slow path. */
+      u32 abits = cs->kind & 3;
+      bool sgn = (cs->kind & MEMFAST_SGN) != 0;
+      bool shifted = (abits == 2) || (abits == 0 && !sgn);
+      u8 *not_rom, *rom_unmapped = NULL;
+
+      ARM_SUB_REG_IMM(0, ARMREG_LR, reg_s0, 8, 0);
+      ARM_CMP_REG_IMM(0, ARMREG_LR, 4, 0);
+      not_rom = translation_ptr;
+      ARM_B_COND(0, ARMCOND_HI, 0);
+      ARM_MOV_REG_IMMSHIFT(0, ARMREG_LR, reg_a0, ARMSHIFT_LSR, 15);
+      ARM_ADD_REG_IMM(0, reg_s0, reg_base, 0xD, arm_imm_lsl_to_rot(8));
+      ARM_LDR_REG_REG_SHIFT(0, reg_s0, reg_s0, ARMREG_LR, ARMSHIFT_LSL, 2);
+      if (rom_pages_can_miss) {
+        ARM_CMP_REG_IMM(0, reg_s0, 0, 0);
+        rom_unmapped = translation_ptr;
+        ARM_B_COND(0, ARMCOND_EQ, 0);
+      }
+      ARM_MOV_REG_IMMSHIFT(0, ARMREG_LR, reg_a0, ARMSHIFT_LSL, 17);
+      if (!shifted) {
+        ARM_MOV_REG_IMMSHIFT(0, ARMREG_LR, ARMREG_LR, ARMSHIFT_LSR, 17);
+      }
+      if (abits == 2) {
+        ARM_LDR_REG_REG_SHIFT(0, reg_rv, reg_s0, ARMREG_LR, ARMSHIFT_LSR, 17);
+      } else if (abits == 1 && sgn) {
+        ARM_LDRSH_REG_REG(0, reg_rv, reg_s0, ARMREG_LR);
+      } else if (abits == 1) {
+        ARM_LDRH_REG_REG(0, reg_rv, reg_s0, ARMREG_LR);
+      } else if (sgn) {
+        ARM_LDRSB_REG_REG(0, reg_rv, reg_s0, ARMREG_LR);
+      } else {
+        ARM_LDRB_REG_REG_SHIFT(0, reg_rv, reg_s0, ARMREG_LR, ARMSHIFT_LSR, 17);
+      }
+      if (cs->keep_flags) {
+        ARM_MSR_REG(0, ARM_PSR_F, reg_a2, ARM_CPSR);
+      }
+      back = translation_ptr;
+      ARM_B(0, 0);
+      generate_branch_patch_unconditional(back, cs->ret);
+      generate_branch_patch_conditional(not_rom, translation_ptr);
+      if (rom_unmapped) {
+        generate_branch_patch_conditional(rom_unmapped, translation_ptr);
+      }
+    }
+
+    /* Slow path: the regular memory handler */
     if (cs->to_slow) {
       generate_branch_patch_conditional(cs->to_slow, translation_ptr);
     }
@@ -2270,6 +2319,8 @@ extern u32 st_lookup_tables[4][17];
 
 void init_emitter(bool must_swap) {
   int i;
+
+  rom_pages_can_miss = must_swap;
 
   // Generate handler table
   memcpy(st_lookup_tables, st_handler_functions, sizeof(st_lookup_tables));
