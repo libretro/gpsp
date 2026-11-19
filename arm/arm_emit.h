@@ -1924,7 +1924,7 @@ static u32 emit_blkmem_fast(u8 **tptr, bool store, const u32 *ralloc,
                             u8 **fails)
 {
   u8 *translation_ptr = *tptr;
-  u8 *to_ewram, *to_common;
+  u8 *to_ewram, *to_common, *to_other, *to_access;
   u32 k, nfails = 0;
 
   if (keep_flags) {
@@ -1953,11 +1953,51 @@ static u32 emit_blkmem_fast(u8 **tptr, bool store, const u32 *ralloc,
   to_common = translation_ptr;
   ARM_B(0, 0);
 
+  /* Neither IWRAM nor EWRAM (reached from the EWRAM check below) */
+  to_other = translation_ptr;
+  if (store) {
+    /* VRAM: data at reg_base + VRAM_OFF, 96KB with the last 32KB mirrored.
+       No tags to check (all words are in the same 32KB page). */
+    ARM_CMP_REG_IMM(0, reg_a1, 6, 0);
+    fails[nfails++] = translation_ptr;
+    ARM_B_COND(0, ARMCOND_NE, 0);
+    ARM_MOV_REG_IMMSHIFT(0, reg_a0, reg_s0, ARMSHIFT_LSL, 15);
+    ARM_MOV_REG_IMMSHIFT(0, reg_a0, reg_a0, ARMSHIFT_LSR, 15);
+    ARM_CMP_REG_IMM(0, reg_a0, 0x18, arm_imm_lsl_to_rot(12));
+    ARM_SUB_REG_IMM_COND(0, reg_a0, reg_a0, 0x8, arm_imm_lsl_to_rot(12),
+                         ARMCOND_CS);
+    ARM_SUB_REG_IMM(0, ARMREG_LR, reg_base, 0x98, arm_imm_lsl_to_rot(12));
+    ARM_ADD_REG_REG(0, reg_a0, reg_a0, ARMREG_LR);
+  } else {
+    /* VRAM and ROM (regions 6 and 8 to 0xC): use the read map, like the
+       regular handlers do. Unmapped pages take the slow path. */
+    u8 *is_vram;
+    ARM_CMP_REG_IMM(0, reg_a1, 6, 0);
+    is_vram = translation_ptr;
+    ARM_B_COND(0, ARMCOND_EQ, 0);
+    ARM_SUB_REG_IMM(0, ARMREG_LR, reg_a1, 8, 0);
+    ARM_CMP_REG_IMM(0, ARMREG_LR, 4, 0);
+    fails[nfails++] = translation_ptr;
+    ARM_B_COND(0, ARMCOND_HI, 0);
+    generate_branch_patch_conditional(is_vram, translation_ptr);
+    ARM_MOV_REG_IMMSHIFT(0, reg_a0, reg_s0, ARMSHIFT_LSR, 15);
+    ARM_ADD_REG_IMM(0, reg_a1, reg_base, 0xD, arm_imm_lsl_to_rot(8));
+    ARM_LDR_REG_REG_SHIFT(0, reg_a1, reg_a1, reg_a0, ARMSHIFT_LSL, 2);
+    ARM_CMP_REG_IMM(0, reg_a1, 0, 0);
+    fails[nfails++] = translation_ptr;
+    ARM_B_COND(0, ARMCOND_EQ, 0);
+    ARM_MOV_REG_IMMSHIFT(0, reg_a0, reg_s0, ARMSHIFT_LSL, 17);
+    ARM_ADD_REG_IMMSHIFT(0, reg_a0, reg_a1, reg_a0, ARMSHIFT_LSR, 17);
+  }
+  to_access = translation_ptr;
+  ARM_B(0, 0);
+
   /* EWRAM: data at reg_base + EWRAM_OFF, tags 0x40000 above */
   generate_branch_patch_conditional(to_ewram, translation_ptr);
   ARM_CMP_REG_IMM(0, reg_a1, 2, 0);
-  fails[nfails++] = translation_ptr;
+  to_ewram = translation_ptr;
   ARM_B_COND(0, ARMCOND_NE, 0);
+  generate_branch_patch_conditional(to_ewram, to_other);
   ARM_MOV_REG_IMMSHIFT(0, reg_a0, reg_s0, ARMSHIFT_LSL, 14);
   ARM_SUB_REG_IMM(0, reg_a1, reg_base, 0x8, arm_imm_lsl_to_rot(16));
   ARM_ADD_REG_IMMSHIFT(0, reg_a0, reg_a1, reg_a0, ARMSHIFT_LSR, 14);
@@ -1977,6 +2017,7 @@ static u32 emit_blkmem_fast(u8 **tptr, bool store, const u32 *ralloc,
     fails[nfails++] = translation_ptr;
     ARM_B_COND(0, ARMCOND_NE, 0);
 
+    generate_branch_patch_unconditional(to_access, translation_ptr);
     for (k = 0; k < n; k++) {
       u32 hreg = ralloc[regs[k]];
       if (hreg != mem_reg) {
@@ -1987,6 +2028,7 @@ static u32 emit_blkmem_fast(u8 **tptr, bool store, const u32 *ralloc,
       }
     }
   } else {
+    generate_branch_patch_unconditional(to_access, translation_ptr);
     for (k = 0; k < n; k++) {
       u32 hreg = ralloc[regs[k]];
       if (hreg != mem_reg) {
