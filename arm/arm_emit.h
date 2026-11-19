@@ -1995,10 +1995,14 @@ static void emit_cold_stubs(u8 **tptr)
     if (cs->keep_flags) {
       ARM_MSR_REG(0, ARM_PSR_F, reg_a2, ARM_CPSR);
     }
+    /* The handler returns to the branch back, which also takes the place
+       of the branch that skips the PC word */
     emit_mem_handler_call(&translation_ptr, cs->kind, cs->store, cs->pcword);
+    translation_ptr -= 8;
     back = translation_ptr;
     ARM_B(0, 0);
     generate_branch_patch_unconditional(back, cs->ret);
+    write32(cs->pcword);
   }
   cold_stub_count = 0;
   *tptr = translation_ptr;
