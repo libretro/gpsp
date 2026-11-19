@@ -1397,21 +1397,14 @@ static void trace_instruction(u32 pc, u32 mode)
 /* ARM mode has no flag liveness information, flags are always preserved.
    The inline RAM fast path is only used for ARM code running from RAM (where
    games keep their hot ARM routines, ie. sound mixers) and for stack
-   accesses: ARM code in ROM tends to poll I/O, where it's just overhead. */
+   accesses. ARM code in ROM tends to poll I/O: its loads check the low I/O
+   registers inline instead, and its stores call the handler directly. */
 #define arm_mem_fast_wanted()  (ram_region || rn == REG_SP)
 
 #define arm_access_memory_load(mem_type)                                      \
   cycle_count += 2;                                                           \
-  if (arm_mem_fast_wanted())                                                  \
-  {                                                                           \
-    emit_mem_access(&translation_ptr, memfast_kind_##mem_type, false, true,   \
-                    pc);                                                      \
-  }                                                                           \
-  else                                                                        \
-  {                                                                           \
-    generate_load_call_##mem_type();                                          \
-    write32(pc);                                                              \
-  }                                                                           \
+  emit_mem_access_ex(&translation_ptr, memfast_kind_##mem_type, false, true,  \
+                     pc, !arm_mem_fast_wanted());                             \
   arm_generate_store_reg_pc_no_flags(reg_rv, rd)                              \
 
 #define arm_access_memory_store(mem_type)                                     \
@@ -1935,18 +1928,19 @@ typedef struct {
   u8 kind;
   u8 store;
   u8 keep_flags;
+  u8 io_first;      /* The low I/O registers are checked inline, not IWRAM */
 } cold_mem_type;
 
 #define MAX_COLD_STUBS      256
 /* Upper bound of the size of a cold stub, in bytes */
-#define COLD_STUB_MAX_SIZE  (48 * 4)
+#define COLD_STUB_MAX_SIZE  (56 * 4)
 static cold_mem_type cold_stubs[MAX_COLD_STUBS];
 /* Set if ROM pages can be unmapped (the ROM is swapped in on demand) */
 static bool rom_pages_can_miss = true;
 static u32 cold_stub_count = 0;
 
-static void emit_mem_access(u8 **tptr, u32 kind, bool store, bool keep_flags,
-                            u32 pcword)
+static void emit_mem_access_ex(u8 **tptr, u32 kind, bool store,
+                               bool keep_flags, u32 pcword, bool io_first)
 {
   u8 *translation_ptr = *tptr;
   u32 abits = kind & 3;
@@ -1963,6 +1957,7 @@ static void emit_mem_access(u8 **tptr, u32 kind, bool store, bool keep_flags,
   cs->keep_flags = keep_flags;
   cs->pcword = pcword;
   cs->to_slow = NULL;
+  cs->io_first = io_first;
 
   if (keep_flags) {
     ARM_MRS_CPSR(0, reg_a2);
@@ -1975,19 +1970,29 @@ static void emit_mem_access(u8 **tptr, u32 kind, bool store, bool keep_flags,
   } else {
     ARM_MOV_REG_IMMSHIFT(0, reg_s0, reg_a0, ARMSHIFT_LSR, 24);
   }
-  ARM_CMP_REG_IMM(0, reg_s0, 3, 0);
+  ARM_CMP_REG_IMM(0, reg_s0, io_first ? 4 : 3, 0);
   cs->to_ewram = translation_ptr;
   ARM_B_COND(0, ARMCOND_NE, 0);
 
-  /* IWRAM: tags at reg_base + IWRAM_OFF, data 0x8000 above */
-  emit_ram_access(&translation_ptr, kind, store, 17,
-                  0xA8, arm_imm_lsl_to_rot(12), 0xA, arm_imm_lsl_to_rot(16),
-                  &cs->to_slow);
+  if (io_first) {
+    emit_io_low_load(&translation_ptr, kind, &cs->to_slow);
+  } else {
+    /* IWRAM: tags at reg_base + IWRAM_OFF, data 0x8000 above */
+    emit_ram_access(&translation_ptr, kind, store, 17,
+                    0xA8, arm_imm_lsl_to_rot(12), 0xA, arm_imm_lsl_to_rot(16),
+                    &cs->to_slow);
+  }
   if (keep_flags) {
     ARM_MSR_REG(0, ARM_PSR_F, reg_a2, ARM_CPSR);
   }
   cs->ret = translation_ptr;
   *tptr = translation_ptr;
+}
+
+static void emit_mem_access(u8 **tptr, u32 kind, bool store, bool keep_flags,
+                            u32 pcword)
+{
+  emit_mem_access_ex(tptr, kind, store, keep_flags, pcword, false);
 }
 
 /* Emits the pending cold stubs (at the end of the block) */
@@ -1999,8 +2004,25 @@ static void emit_cold_stubs(u8 **tptr)
     cold_mem_type *cs = &cold_stubs[i];
     u8 *to_slow_region, *to_slow_smc = NULL, *back;
 
-    /* EWRAM: data at reg_base + EWRAM_OFF, tags 0x40000 above */
     generate_branch_patch_conditional(cs->to_ewram, translation_ptr);
+    if (cs->io_first) {
+      /* IWRAM was not checked inline (loads only) */
+      u8 *not_iwram, *unused;
+      ARM_CMP_REG_IMM(0, reg_s0, 3, 0);
+      not_iwram = translation_ptr;
+      ARM_B_COND(0, ARMCOND_NE, 0);
+      emit_ram_access(&translation_ptr, cs->kind, false, 17,
+                      0xA8, arm_imm_lsl_to_rot(12), 0xA, arm_imm_lsl_to_rot(16),
+                      &unused);
+      if (cs->keep_flags) {
+        ARM_MSR_REG(0, ARM_PSR_F, reg_a2, ARM_CPSR);
+      }
+      back = translation_ptr;
+      ARM_B(0, 0);
+      generate_branch_patch_unconditional(back, cs->ret);
+      generate_branch_patch_conditional(not_iwram, translation_ptr);
+    }
+    /* EWRAM: data at reg_base + EWRAM_OFF, tags 0x40000 above */
     ARM_CMP_REG_IMM(0, reg_s0, 2, 0);
     to_slow_region = translation_ptr;
     ARM_B_COND(0, ARMCOND_NE, 0);
@@ -2057,7 +2079,7 @@ static void emit_cold_stubs(u8 **tptr)
       ARM_B(0, 0);
       generate_branch_patch_unconditional(back, cs->ret);
       generate_branch_patch_conditional(not_rom, translation_ptr);
-      {
+      if (!cs->io_first) {
         /* I/O registers below 0x10 (DISPCNT, DISPSTAT, VCOUNT...) are plain
            memory reads, like in ld_ioram */
         u8 *not_io, *io_slow;
