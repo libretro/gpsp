@@ -1864,6 +1864,34 @@ static void emit_ram_access(u8 **tptr, u32 kind, bool store, u32 shift,
   *tptr = translation_ptr;
 }
 
+/* Loads an I/O register below 0x10 (DISPCNT, DISPSTAT, VCOUNT...): these
+ * are plain memory reads, like in ld_ioram. Address in reg_a0 (region 4,
+ * aligned), result in reg_rv. Other registers branch to *io_slow. */
+static void emit_io_low_load(u8 **tptr, u32 kind, u8 **io_slow)
+{
+  u8 *translation_ptr = *tptr;
+  u32 abits = kind & 3;
+  bool sgn = (kind & MEMFAST_SGN) != 0;
+
+  ARM_BIC_REG_IMM(0, ARMREG_LR, reg_a0, 0xFF, arm_imm_lsl_to_rot(24));
+  ARM_CMP_REG_IMM(0, ARMREG_LR, 0x10, 0);
+  *io_slow = translation_ptr;
+  ARM_B_COND(0, ARMCOND_CS, 0);
+  ARM_ADD_REG_IMM(0, reg_s0, reg_base, 0x8D, arm_imm_lsl_to_rot(8));
+  if (abits == 2) {
+    ARM_LDR_REG_REG(0, reg_rv, reg_s0, ARMREG_LR);
+  } else if (abits == 1 && sgn) {
+    ARM_LDRSH_REG_REG(0, reg_rv, reg_s0, ARMREG_LR);
+  } else if (abits == 1) {
+    ARM_LDRH_REG_REG(0, reg_rv, reg_s0, ARMREG_LR);
+  } else if (sgn) {
+    ARM_LDRSB_REG_REG(0, reg_rv, reg_s0, ARMREG_LR);
+  } else {
+    ARM_LDRB_REG_REG(0, reg_rv, reg_s0, ARMREG_LR);
+  }
+  *tptr = translation_ptr;
+}
+
 /* Emits the regular memory handler call (followed by its PC word) */
 static void emit_mem_handler_call(u8 **tptr, u32 kind, bool store, u32 pcword)
 {
@@ -2029,6 +2057,23 @@ static void emit_cold_stubs(u8 **tptr)
       ARM_B(0, 0);
       generate_branch_patch_unconditional(back, cs->ret);
       generate_branch_patch_conditional(not_rom, translation_ptr);
+      {
+        /* I/O registers below 0x10 (DISPCNT, DISPSTAT, VCOUNT...) are plain
+           memory reads, like in ld_ioram */
+        u8 *not_io, *io_slow;
+        ARM_CMP_REG_IMM(0, reg_s0, 4, 0);
+        not_io = translation_ptr;
+        ARM_B_COND(0, ARMCOND_NE, 0);
+        emit_io_low_load(&translation_ptr, cs->kind, &io_slow);
+        if (cs->keep_flags) {
+          ARM_MSR_REG(0, ARM_PSR_F, reg_a2, ARM_CPSR);
+        }
+        back = translation_ptr;
+        ARM_B(0, 0);
+        generate_branch_patch_unconditional(back, cs->ret);
+        generate_branch_patch_conditional(not_io, translation_ptr);
+        generate_branch_patch_conditional(io_slow, translation_ptr);
+      }
       if (rom_unmapped) {
         generate_branch_patch_conditional(rom_unmapped, translation_ptr);
       }
