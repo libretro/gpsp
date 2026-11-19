@@ -454,16 +454,42 @@ u32 arm_disect_imm_32bit(u32 imm, u32 *stores, u32 *rotations)
    regular conditional branch, which the CPU can predict, unlike a computed
    jump. Guest flags live in the host CPSR, so they are saved in reg_a2
    (preserved by the update handler, which only returns here if the PC did
-   not change, so flags are still valid) and restored on both paths. */
+   not change, so flags are still valid). Any pending cycle update is folded
+   into the check (adds), and the update call sits after the block exit
+   branch, so the common path is straight-line code. */
 #define generate_branch_update(writeback_location, new_pc, mode)              \
+{                                                                             \
+  u8 *upd_restore, *upd_back;                                                 \
   ARM_MRS_CPSR(0, reg_a2);                                                    \
-  ARM_CMP_REG_IMM(0, reg_cycles, 0, 0);                                       \
-  ARM_B_COND(0, ARMCOND_MI, 3);            /* cycles left: skip update */     \
-  ARM_B(0, 0);                             /* skip over the PC word */        \
+  if(cycle_count & 0xFF)                                                      \
+  {                                                                           \
+    if(cycle_count >> 8)                                                      \
+    {                                                                         \
+      ARM_ADD_REG_IMM(0, reg_cycles, reg_cycles, (cycle_count >> 8) & 0xFF,   \
+       arm_imm_lsl_to_rot(8));                                                \
+    }                                                                         \
+    ARM_ADDS_REG_IMM(0, reg_cycles, reg_cycles, (cycle_count & 0xFF), 0);     \
+  }                                                                           \
+  else if(cycle_count)                                                        \
+  {                                                                           \
+    ARM_ADDS_REG_IMM(0, reg_cycles, reg_cycles, (cycle_count >> 8) & 0xFF,    \
+     arm_imm_lsl_to_rot(8));                                                  \
+  }                                                                           \
+  else                                                                        \
+  {                                                                           \
+    ARM_CMP_REG_IMM(0, reg_cycles, 0, 0);                                     \
+  }                                                                           \
+  cycle_count = 0;                                                            \
+  ARM_B_COND(0, ARMCOND_PL, 2);            /* no cycles left: update */       \
+  upd_restore = translation_ptr;                                              \
+  ARM_MSR_REG(0, ARM_PSR_F, reg_a2, ARM_CPSR);                                \
+  generate_branch_filler(ARMCOND_AL, writeback_location);                     \
   write32(new_pc);                                                            \
   generate_function_far_call(armfn_gbaup_##mode);   /* 2 instructions */      \
-  ARM_MSR_REG(0, ARM_PSR_F, reg_a2, ARM_CPSR);                                \
-  generate_branch_filler(ARMCOND_AL, writeback_location)                      \
+  upd_back = translation_ptr;                                                 \
+  ARM_B(0, 0);                                                                \
+  generate_branch_patch_unconditional(upd_back, upd_restore);                 \
+}                                                                             \
 
 
 #define generate_branch_no_cycle_update(writeback_location, new_pc, mode)     \
@@ -476,8 +502,13 @@ u32 arm_disect_imm_32bit(u32 imm, u32 *stores, u32 *rotations)
     generate_branch_update(writeback_location, new_pc, mode);                 \
   }                                                                           \
 
+/* The pending cycle update is emitted by generate_branch_update (the idle
+   loop version needs it done before) */
 #define generate_branch_cycle_update(writeback_location, new_pc, mode)        \
-  generate_cycle_update();                                                    \
+  if(pc == idle_loop_target_pc)                                               \
+  {                                                                           \
+    generate_cycle_update();                                                  \
+  }                                                                           \
   generate_branch_no_cycle_update(writeback_location, new_pc, mode)           \
 
 /* a0 holds the destination */
@@ -1907,14 +1938,23 @@ static void trace_instruction(u32 pc, u32 mode)
   thumb_block_memory_extra_##post_op();                                       \
 }                                                                             \
 
+/* The cycle update is done on both paths: folded into the cycle check if
+   the branch is taken, as a plain add otherwise. */
 #define thumb_conditional_branch(condition)                                   \
 {                                                                             \
-  generate_cycle_update();                                                    \
+  u32 cond_cycles = cycle_count;                                              \
+  if(pc == idle_loop_target_pc)                                               \
+  {                                                                           \
+    generate_cycle_update();                                                  \
+    cond_cycles = 0;                                                          \
+  }                                                                           \
   generate_branch_filler(condition_opposite_##condition, backpatch_address);  \
   generate_branch_no_cycle_update(                                            \
    block_exits[block_exit_position].branch_source,                            \
    block_exits[block_exit_position].branch_target, thumb);                    \
   generate_branch_patch_conditional(backpatch_address, translation_ptr);      \
+  cycle_count = cond_cycles;                                                  \
+  generate_cycle_update();                                                    \
   block_exit_position++;                                                      \
 }                                                                             \
 
