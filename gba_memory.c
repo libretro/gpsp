@@ -1498,6 +1498,17 @@ s32 rtc_bit_count;
  * frame_counter wraps after ~2.27 years of continuous emulation. */
 static s64 rtc_base_time = 0;
 static rtc_time_source_type rtc_time_source = RTC_TIME_SOURCE_DETERMINISTIC;
+static const struct retro_calendar_time_interface *rtc_calendar = NULL;
+/* Seconds east of UTC from the frontend's clock, kept in savestates. */
+static s32 rtc_utc_offset = 0;
+static bool rtc_utc_offset_valid = false;
+/* The offset at content load, for states saved without one. */
+static s32 rtc_start_utc_offset = 0;
+static bool rtc_start_utc_offset_valid = false;
+/* System Clock mode: the frontend's time, read once per frame. */
+static s64 rtc_frame_time = 0;
+static s32 rtc_frame_utc_offset = 0;
+static bool rtc_frame_time_valid = false;
 
 void rtc_set_time_source(rtc_time_source_type source)
 {
@@ -1507,25 +1518,96 @@ void rtc_set_time_source(rtc_time_source_type source)
   rtc_time_source = source;
 }
 
+void rtc_set_calendar(const struct retro_calendar_time_interface *calendar)
+{
+  rtc_calendar = calendar;
+}
+
 /* Cycles per frame at the native rate; same divisor at the 60FPS
  * overclock since GBC_BASE_RATE scales correspondingly. */
 #define GBA_CYCLES_PER_FRAME 280896
 #define GBA_FRAME_SECONDS    ((double)GBA_CYCLES_PER_FRAME / (double)GBC_BASE_RATE)
 
-static void rtc_init_base_time(void)
+static s64 rtc_elapsed_seconds(void)
 {
-  time_t t;
-  time(&t);
-  rtc_base_time = (s64)t;
+  return (s64)((double)frame_counter * GBA_FRAME_SECONDS);
 }
 
-static time_t rtc_current_time(void)
+static void rtc_init_base_time(void)
 {
-  if (rtc_time_source == RTC_TIME_SOURCE_SYSTEM)
-    return time(NULL);
+  struct retro_calendar_time start;
+  time_t t;
 
-  return (time_t)(rtc_base_time +
-                  (s64)((double)frame_counter * GBA_FRAME_SECONDS));
+  if (rtc_calendar && rtc_calendar->get_start_time &&
+      rtc_calendar->get_start_time(&start))
+  {
+    rtc_base_time              = start.sec;
+    rtc_start_utc_offset       = start.utc_offset;
+    rtc_start_utc_offset_valid = true;
+  }
+  else
+  {
+    time(&t);
+    rtc_base_time              = (s64)t;
+    rtc_start_utc_offset_valid = false;
+  }
+
+  rtc_utc_offset       = rtc_start_utc_offset;
+  rtc_utc_offset_valid = rtc_start_utc_offset_valid;
+}
+
+static struct tm *rtc_local_time(void)
+{
+  time_t t;
+
+  if (rtc_time_source == RTC_TIME_SOURCE_SYSTEM)
+  {
+    if (!rtc_calendar)
+    {
+      t = time(NULL);
+      return localtime(&t);
+    }
+    /* Invalid while the frontend holds its clock: stay deterministic. */
+    if (rtc_frame_time_valid)
+    {
+      t = (time_t)(rtc_frame_time + rtc_frame_utc_offset);
+      return gmtime(&t);
+    }
+  }
+
+  t = (time_t)(rtc_base_time + rtc_elapsed_seconds());
+  if (rtc_utc_offset_valid)
+  {
+    t += rtc_utc_offset;
+    return gmtime(&t);
+  }
+
+  return localtime(&t);
+}
+
+void rtc_frame_update(void)
+{
+  struct retro_calendar_time now;
+
+  if (!rtc_enabled || rtc_time_source != RTC_TIME_SOURCE_SYSTEM ||
+      !rtc_calendar)
+    return;
+
+  rtc_frame_time_valid = rtc_calendar->get_current_time &&
+                         rtc_calendar->get_current_time(&now);
+  if (rtc_frame_time_valid)
+  {
+    rtc_frame_time       = now.sec;
+    rtc_frame_utc_offset = now.utc_offset;
+  }
+}
+
+/* Before retro_reset zeroes frame_counter: with the frontend's clock the
+ * RTC keeps running across reset, like a battery-backed one. */
+void rtc_carry_elapsed_time(void)
+{
+  if (rtc_utc_offset_valid)
+    rtc_base_time += rtc_elapsed_seconds();
 }
 
 
@@ -1608,8 +1690,7 @@ static void write_rtc(u8 old, u8 new)
         case RTC_COMMAND_OUTPUT_TIME_FULL:
           {
             struct tm *current_time;
-            time_t current_time_flat = rtc_current_time();
-            current_time = localtime(&current_time_flat);
+            current_time = rtc_local_time();
 
             rtc_state = RTC_OUTPUT_DATA;
             rtc_data_bits = 56;
@@ -1625,8 +1706,7 @@ static void write_rtc(u8 old, u8 new)
         case RTC_COMMAND_OUTPUT_TIME:
           {
             struct tm *current_time;
-            time_t current_time_flat = rtc_current_time();
-            current_time = localtime(&current_time_flat);
+            current_time = rtc_local_time();
 
             rtc_state = RTC_OUTPUT_DATA;
             rtc_data_bits = 24;
@@ -2755,6 +2835,21 @@ bool memory_read_savestate(const u8 *src)
       rtc_base_time = (s64)((u64)base_words[0] | (((u64)base_words[1]) << 32));
   }
 
+  /* Absent when the offset was unknown at save time; use the load-time one. */
+  {
+    u32 utc_offset;
+    if (bson_read_int32(bakdoc, "rtc-utc-offset", &utc_offset))
+    {
+      rtc_utc_offset       = (s32)utc_offset;
+      rtc_utc_offset_valid = true;
+    }
+    else
+    {
+      rtc_utc_offset       = rtc_start_utc_offset;
+      rtc_utc_offset_valid = rtc_start_utc_offset_valid;
+    }
+  }
+
   for (i = 0; i < DMA_CHAN_CNT; i++)
   {
     char tname[2] = {'0' + i, 0};
@@ -2820,6 +2915,10 @@ unsigned memory_write_savestate(u8 *dst)
     u32 base_words[2] = { (u32)(u64)rtc_base_time,
                           (u32)(((u64)rtc_base_time) >> 32) };
     bson_write_int32array(dst, "rtc-base-time", base_words, 2);
+  }
+  if (rtc_utc_offset_valid)
+  {
+    bson_write_int32(dst, "rtc-utc-offset", (u32)rtc_utc_offset);
   }
   bson_finish_document(dst, wbptr);
 
@@ -3257,11 +3356,12 @@ u32 load_gamepak(const struct retro_game_info* info, const char *name,
       rumble_enabled = (force_rumble == FEAT_ENABLE);
 
    /* Capture the RTC baseline once per content load (and only here -
-    * not in init_memory/reset_gba, so a retro_reset does not change the
-    * baseline; the in-game clock instead snaps back to the load-time
-    * point since frame_counter is reset to 0).  This makes the entire
-    * RTC stream a deterministic function of frame_counter and
-    * rtc_base_time, both of which are persisted in the savestate. */
+    * not in init_memory/reset_gba, so a retro_reset does not re-read the
+    * baseline; without the frontend's clock the in-game clock instead
+    * snaps back to the load-time point since frame_counter is reset to
+    * 0).  This makes the entire RTC stream a deterministic function of
+    * frame_counter and rtc_base_time, both of which are persisted in the
+    * savestate. */
    rtc_init_base_time();
 
    return 0;

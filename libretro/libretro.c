@@ -123,6 +123,7 @@ int sprite_limit = 1;
 static int rtc_mode = FEAT_AUTODETECT;
 static int rumble_mode = FEAT_AUTODETECT;
 static int serial_setting = SERIAL_MODE_AUTO;
+static struct retro_calendar_time_interface calendar_iface;
 
 u32 idle_loop_target_pc = 0xFFFFFFFF;
 u32 translation_gate_target_pc[MAX_TRANSLATION_GATES];
@@ -712,6 +713,13 @@ void retro_init(void)
    // This interface is actually optional
    environ_cb(RETRO_ENVIRONMENT_SET_NETPACKET_INTERFACE, (void*)&netpacket_iface);
 
+   calendar_iface.interface_version = RETRO_CALENDAR_TIME_INTERFACE_VERSION;
+   if (environ_cb(RETRO_ENVIRONMENT_GET_CALENDAR_TIME_INTERFACE, &calendar_iface) &&
+       calendar_iface.interface_version >= 1)
+      rtc_set_calendar(&calendar_iface);
+   else
+      rtc_set_calendar(NULL);
+
    current_frameskip_type = no_frameskip;
    frameskip_threshold    = 0;
    frameskip_interval     = 0;
@@ -729,6 +737,7 @@ void retro_deinit(void)
 {
    perf_cb.perf_log();
    memory_term();
+   rtc_set_calendar(NULL);
 
 #if defined(MMAP_JIT_CACHE) && defined(HAVE_DYNAREC)
    if (rom_translation_cache)
@@ -844,6 +853,7 @@ void retro_set_controller_port_device(unsigned port, unsigned device) {}
 
 void retro_reset(void)
 {
+   rtc_carry_elapsed_time();
    reset_gba();
 }
 
@@ -1371,6 +1381,7 @@ void retro_run(void)
 
    input_poll_cb();
    update_input();
+   rtc_frame_update();
 
    rumble_frame_reset();
 
